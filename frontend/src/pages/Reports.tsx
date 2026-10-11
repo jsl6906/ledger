@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { get, type CashflowMonth, type CategoryRow, type Merchant, type Trend } from '../api'
 import { stackColor } from '../chartUtils'
 import { Legend, NET_DOWN, NET_UP, NetChart, SeriesHistory, StackedBars } from '../components/Charts'
 import { Button, Card, ErrorNote, Seg, SortTh } from '../components/ui'
 import { iso, money, moneyRound, monthEnd, parseIso, shortDate } from '../format'
-import { categoryPath, groupPath, merchantPath } from '../links'
+import { useCategories, useGroups } from '../hooks'
+import { categoryPath, groupPath, merchantPath, txnsPath } from '../links'
 import { tipHandlers, useTip, type TipSpec } from '../tip'
 import { numParam, oneOf, sortRows, useUrl, useUrlSort } from '../urlState'
 
@@ -33,6 +34,9 @@ function rangeDates(r: Range, firstYear: number, fromYear: number, toYear: numbe
 
 export function Reports() {
   const tip = useTip()
+  const navigate = useNavigate()
+  const allCats = useCategories()
+  const allGroups = useGroups()
   const [params, set] = useUrl()
   const range = oneOf(params, 'range', RANGES, '12m')
   const histLevel = oneOf(params, 'hl', LEVELS, 'group')
@@ -111,6 +115,29 @@ export function Reports() {
       return { title: `${s.name} · ${monthName(m)}`, lines: [money(s.values[i])],
         contrib: s.name === 'Other' ? { ...base, exclude: others } : { ...base, ids: [sid(s)] } }
     }
+  const openSegment = (q: typeof incStack, kind: 'income' | 'expense', level: 'group' | 'category') =>
+    (i: number, si: number) => {
+      const d = q.data
+      if (!d) return
+      const m = d.months[i]
+      const s = d.series[si]
+      const when = { start: m, end: monthEnd(m) }
+      const label = `${s.name} · ${monthName(m)}`
+      const cats = allCats.data ?? []
+      if (s.name === 'Other') {
+        const shown = new Set(d.series.filter((x) => x.id !== null).map((x) => x.id))
+        const hiddenGroups = new Set((allGroups.data ?? []).filter((g) => g.hide_from_reports).map((g) => g.id))
+        const ids = cats.filter((c) => c.type === kind && !c.hide_from_reports && !hiddenGroups.has(c.group_id)
+          && !shown.has(level === 'group' ? c.group_id : c.id)).map((c) => c.id)
+        if (ids.length) navigate(txnsPath({ categories: ids, label: `Other ${kind} · ${monthName(m)}`, ...when }))
+      } else if (s.id === null) {
+        navigate(txnsPath({ status: 'uncategorized', ...when }))
+      } else if (level === 'category') {
+        navigate(txnsPath({ category: s.id, ...when }))
+      } else {
+        navigate(txnsPath({ categories: cats.filter((c) => c.group_id === s.id).map((c) => c.id), label, ...when }))
+      }
+    }
 
   return (
     <section className="page">
@@ -160,12 +187,12 @@ export function Reports() {
               options={[{ value: 'group', label: 'Groups' }, { value: 'category', label: 'Categories' }]} />
           </div>
           <StackedBars months={c.q.data?.months ?? []} series={c.q.data?.series ?? []} highlight={month}
-            onPick={pickMonth} tip={stackTip(c.q, c.kind, c.lvl)} />
+            onPick={pickMonth} onSegment={openSegment(c.q, c.kind, c.lvl)} tip={stackTip(c.q, c.kind, c.lvl)} />
           <Legend items={[
             ...(c.q.data?.series ?? []).map((s, i) => ({ label: `${s.name} ${moneyRound(s.total / n)}/mo`, color: stackColor(s.name, i) })),
             { label: '12-mo avg', color: 'var(--color-text)', dashed: true },
           ]} />
-          {c.key === 'exp' && <div className="card-meta">Hover a bar or segment for its top merchants; click a month to break it down below, click it again to clear.</div>}
+          {c.key === 'exp' && <div className="card-meta">Hover a bar or segment for its top merchants; click a segment to see its transactions, or click beside the bar to break that month down below (again to clear).</div>}
         </Card>
       ))}
 

@@ -76,9 +76,9 @@ const trailingAvg = (vals: number[], n = 12) =>
   vals.map((_, i) => { const s = vals.slice(Math.max(0, i - n + 1), i + 1); return s.reduce((a, v) => a + v, 0) / s.length })
 
 /** Monthly stacked bars (one segment per series) with a trailing 12-month average of the total. */
-export function StackedBars({ months, series, onPick, highlight, height = 240, tip }: {
+export function StackedBars({ months, series, onPick, onSegment, highlight, height = 240, tip }: {
   months: string[]; series: { name: string; values: number[] }[]; onPick?: (month: string) => void
-  highlight?: string | null; height?: number
+  onSegment?: (i: number, si: number) => void; highlight?: string | null; height?: number
   tip?: (i: number, si: number | null, ctx: { total: number; avg: number }) => TipSpec | null
 }) {
   const t = useTip()
@@ -121,7 +121,8 @@ export function StackedBars({ months, series, onPick, highlight, height = 240, t
               fill={highlight === m ? 'color-mix(in srgb, var(--color-accent) 14%, transparent)' : 'transparent'} />
             {segs.map((sg) => sg.v > 0 && (
               <rect key={sg.name} x={cx(i) - bar / 2} y={sg.y1} width={bar} height={sg.y0 - sg.y1} fill={stackColor(sg.name, sg.si)}
-                {...hover(i, sg.si)} />
+                {...hover(i, sg.si)}
+                onClick={onSegment ? (e) => { e.stopPropagation(); t.hide(); onSegment(i, sg.si) } : undefined} />
             ))}
             {tick && (
               <text x={cx(i)} y={height - 4} fontSize="10" textAnchor="middle" fill="var(--color-neutral-600)" fontFamily="Barlow">{tick}</text>
