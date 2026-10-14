@@ -70,12 +70,14 @@ async def configure_tiller(body: TillerIn, session: AsyncSession = Depends(get_s
             422, f"'{info['title']}' has no '{body.transactions_sheet}' sheet (found: {', '.join(info['sheets'])})"
         )
     s = await _upsert(session, "tiller")
+    ignored = (s.config or {}).get("ignored_accounts")
     s.config = {
         "sheet_id": sheet_id,
         "sheet_title": info["title"],
         "lookback_days": body.lookback_days,
         "transactions_sheet": body.transactions_sheet,
         "balances_sheet": body.balances_sheet if body.balances_sheet in info["sheets"] else None,
+        **({"ignored_accounts": ignored} if ignored else {}),
     }
     await session.commit()
     return await _out(session, s)

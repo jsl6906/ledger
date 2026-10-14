@@ -1,7 +1,8 @@
 """Per-entity analytics for the detail pages (merchant, account, category, category group).
 
-Detail pages show everything booked against the entity, including transfers and hidden categories; only deleted rows are
-excluded. Amounts: `spent` = money out (positive), `received` = money in, `net` = signed sum.
+Detail pages show everything booked against the entity, including transfers and hidden categories; only deleted rows and
+(except on account pages) hidden accounts' rows and internal transfers are excluded. Amounts: `spent` = money out
+(positive), `received` = money in, `net` = signed sum.
 """
 
 from datetime import date, timedelta
@@ -10,6 +11,7 @@ from statistics import median
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger.analytics.transfers import HIDDEN_ACCOUNT, INTERNAL_TRANSFER
 from ledger.budgets.service import add_months
 
 MERCHANT_KEY = "coalesce(t.merchant, lower(t.description))"
@@ -50,7 +52,8 @@ def _f(v) -> float:
 
 
 def _where(scope: str) -> str:
-    return f"t.deleted_at IS NULL AND {SCOPES[scope]}"
+    internal = "" if scope == "account" else f" AND NOT {HIDDEN_ACCOUNT} AND NOT {INTERNAL_TRANSFER}"
+    return f"t.deleted_at IS NULL AND {SCOPES[scope]}{internal}"
 
 
 def month_start(d: date) -> date:

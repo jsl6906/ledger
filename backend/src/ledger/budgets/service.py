@@ -70,6 +70,7 @@ _SPREAD_ACTUALS = text(
         FROM "transaction" t
         WHERE t.deleted_at IS NULL
           AND t.category_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM account xa WHERE xa.id = t.account_id AND xa.is_hidden)
           AND t.txn_date >= CAST(:start AS date) - interval '60 months'
           AND t.txn_date <= CAST(:end AS date)
     )

@@ -52,7 +52,7 @@ export function Dashboard() {
   const accountGroups = new Map<string, { a: NonNullable<typeof accounts.data>[number]; bal: number; asOf: string }[]>()
   for (const a of accounts.data ?? []) {
     const b = balanceBy.get(a.id)
-    if (a.is_closed || a.is_hidden || !b || !Number(b.balance)) continue
+    if (a.is_closed || !b || !Number(b.balance)) continue
     const bal = ['credit_card', 'loan', 'mortgage'].includes(a.account_type) ? -Math.abs(Number(b.balance)) : Number(b.balance)
     const rows = accountGroups.get(a.account_type) ?? []
     rows.push({ a, bal, asOf: b.as_of })
@@ -66,8 +66,8 @@ export function Dashboard() {
   const mon = now.toLocaleString('en-US', { month: 'short' })
 
   const stats = [
-    { k: `Spent · ${mon}`, v: s ? moneyRound(s.spent) : '—', m: `${s?.count ?? 0} transactions, excl. transfers` },
-    { k: `Income · ${mon}`, v: s ? moneyRound(s.income) : '—', m: 'Excl. transfers & hidden' },
+    { k: `Spent · ${mon}`, v: s ? moneyRound(s.spent) : '—', m: `${s?.count ?? 0} transactions, excl. internal transfers` },
+    { k: `Income · ${mon}`, v: s ? moneyRound(s.income) : '—', m: 'Excl. internal transfers & hidden' },
     { k: 'Budget left', v: bs && bs.total.count ? moneyRound(bs.total.left) : '—',
       m: bs && bs.total.count ? `${bs.total.over_count} of ${bs.total.count} categories over` : 'No budgets yet' },
     { k: 'Uncategorized', v: s ? String(s.uncategorized_all) : '—', m: `${s?.uncategorized ?? 0} this month` },

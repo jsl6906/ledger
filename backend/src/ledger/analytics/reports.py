@@ -1,7 +1,8 @@
 """Reporting queries: cash flow, category breakdowns and trends, merchants.
 
-Reportable = not a transfer, not the uncategorized leg of a matched transfer, and not hidden. Other uncategorized
-rows count as income/expense by sign.
+Reportable = not in a hidden account, not an internal transfer (matched pair between visible accounts) and not in a
+hidden category. Uncategorized rows and the remaining transfers (unmatched, or matched with a hidden account) count as
+income/expense by sign.
 """
 
 from datetime import date
@@ -10,10 +11,12 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-REPORTABLE = """
+from ledger.analytics.transfers import HIDDEN_ACCOUNT, INTERNAL_TRANSFER
+
+REPORTABLE = f"""
     t.deleted_at IS NULL
-    AND coalesce(c.type, '') <> 'transfer'
-    AND (t.transfer_match_id IS NULL OR c.id IS NOT NULL)
+    AND NOT {HIDDEN_ACCOUNT}
+    AND NOT {INTERNAL_TRANSFER}
     AND NOT coalesce(c.hide_from_reports, false)
     AND NOT coalesce(g.hide_from_reports, false)
 """
@@ -22,8 +25,9 @@ FROM = """
     LEFT JOIN category c ON c.id = t.category_id
     LEFT JOIN category_group g ON g.id = c.group_id
 """
-INCOME = "CASE WHEN c.type = 'income' OR (c.id IS NULL AND t.amount > 0) THEN t.amount ELSE 0 END"
-EXPENSE = "CASE WHEN c.type = 'expense' OR (c.id IS NULL AND t.amount < 0) THEN -t.amount ELSE 0 END"
+BY_SIGN = "coalesce(c.type, 'transfer') = 'transfer'"
+INCOME = f"CASE WHEN c.type = 'income' OR ({BY_SIGN} AND t.amount > 0) THEN t.amount ELSE 0 END"
+EXPENSE = f"CASE WHEN c.type = 'expense' OR ({BY_SIGN} AND t.amount < 0) THEN -t.amount ELSE 0 END"
 
 
 def _f(v) -> float:
@@ -103,7 +107,7 @@ async def category_trend(
                sum({measure}) AS spent
         {FROM}
         WHERE {REPORTABLE} AND t.txn_date BETWEEN :start AND :end
-          AND (c.type = :kind OR (c.id IS NULL AND t.amount {sign} 0))
+          AND (c.type = :kind OR ({BY_SIGN} AND t.amount {sign} 0))
         GROUP BY 1, 2, 3
     """
     totals: dict = {}
@@ -185,7 +189,7 @@ async def contributors(
     conds = [REPORTABLE if basis == "reports" else "t.deleted_at IS NULL", "t.txn_date BETWEEN :start AND :end"]
     params: dict = {"start": start, "end": end, "limit": limit}
     if kind:
-        conds.append(f"(c.type = :kind OR (c.id IS NULL AND t.amount {'>' if kind == 'income' else '<'} 0))")
+        conds.append(f"(c.type = :kind OR ({BY_SIGN} AND t.amount {'>' if kind == 'income' else '<'} 0))")
         params["kind"] = kind
     if ids:
         conds.append(f"{col} = ANY(:ids)")

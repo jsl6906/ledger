@@ -69,7 +69,7 @@ _MONTH_TXNS = text(
     f"""--sql
     SELECT t.id, t.txn_date, t.description, t.merchant, -t.amount AS spent, c.id AS category_id
     {FROM}
-    WHERE {REPORTABLE} AND t.amount < 0 AND t.txn_date BETWEEN :start AND :end
+    WHERE {REPORTABLE} AND coalesce(c.type, '') <> 'transfer' AND t.amount < 0 AND t.txn_date BETWEEN :start AND :end
     """
 )
 

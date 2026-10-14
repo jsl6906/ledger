@@ -33,6 +33,7 @@ export function Transactions() {
     dateStart || dateEnd ? 'custom' : batchId || ruleId ? 'all' : 'last_90')
   const accountId = numParam(searchParams, 'account')
   const categoryId = numParam(searchParams, 'category')
+  const showHidden = searchParams.get('hidden') === '1'
   const page = Math.max(1, numParam(searchParams, 'page') ?? 1)
   const offset = (page - 1) * PAGE
   const sort = useUrlSort(TXN_SORT, 'date_desc', 'sort', ['page'])
@@ -52,6 +53,7 @@ export function Transactions() {
     q, status, ...range, account_id: accountId ?? undefined,
     category_id: categoryId ?? (urlCats.length ? urlCats : undefined), limit: PAGE, offset,
     sort: `${sort.key}_${sort.dir}`, import_batch_id: batchId ?? undefined, rule_id: ruleId ?? undefined,
+    include_hidden: showHidden || undefined,
   }
   const [checked, setChecked] = useKeyedState(JSON.stringify(params), () => new Set<number>())
   const filter = (patch: Patch) => set({ ...patch, page: null })
@@ -184,6 +186,11 @@ export function Transactions() {
             Categorized by rule #{ruleId} ×
           </button>
         )}
+        <label className="row small" style={{ gap: 6, cursor: 'pointer' }}
+          title="Hidden accounts' transactions and matched transfers between visible accounts are left out by default">
+          <input type="checkbox" checked={showHidden} onChange={(e) => filter({ hidden: e.target.checked ? 1 : null })} />
+          Show hidden & internal transfers
+        </label>
       </div>
 
       {job.data && (

@@ -127,7 +127,7 @@ export function Reports() {
       if (s.name === 'Other') {
         const shown = new Set(d.series.filter((x) => x.id !== null).map((x) => x.id))
         const hiddenGroups = new Set((allGroups.data ?? []).filter((g) => g.hide_from_reports).map((g) => g.id))
-        const ids = cats.filter((c) => c.type === kind && !c.hide_from_reports && !hiddenGroups.has(c.group_id)
+        const ids = cats.filter((c) => (c.type === kind || c.type === 'transfer') && !c.hide_from_reports && !hiddenGroups.has(c.group_id)
           && !shown.has(level === 'group' ? c.group_id : c.id)).map((c) => c.id)
         if (ids.length) navigate(txnsPath({ categories: ids, label: `Other ${kind} · ${monthName(m)}`, ...when }))
       } else if (s.id === null) {

@@ -116,6 +116,18 @@ async def test_tiller_feed_sync(client, no_ai):
     trend = (await client.get("/api/balances/trend")).json()
     assert trend[str(acct.id)] == [{"as_of": d.isoformat(), "balance": 1834.12}]
 
+    # A retired feed account is skipped entirely: no account, balances or transactions.
+    retired = [_tiller_row(d, "TS RETIRED", -3, "tid-retired", account="TS Old Card", number="9911")]
+    old_bal = [{**balances[0], "Account": "TS Old Card", "Account ID": "acct-TS Old Card", "Account #": "9911"}]
+    async with get_sessionmaker()() as s:
+        src = await s.get(Source, sid)
+        src.config = {**src.config, "ignored_accounts": ["acct-TS Old Card"]}
+        await s.commit()
+        res = await apply_feed(s, await s.get(Source, sid), tiller.build_feed(retired, old_bal, None))
+    assert res["accounts"] == 0 and res["new"] == 0
+    async with get_sessionmaker()() as s:
+        assert await s.scalar(select(Account).where(Account.name == "TS Old Card")) is None
+
 
 async def test_feed_duplicates_against_manual_entries(client, no_ai):
     acct = (
@@ -128,6 +140,13 @@ async def test_feed_duplicates_against_manual_entries(client, no_ai):
             json={"txn_date": d.isoformat(), "description": desc, "amount": amt, "account_id": acct["id"]},
         )
         assert r.status_code == 201
+    # Same amount and day in another account (the other leg of a transfer) is not a duplicate of a synced row.
+    other = (await client.post("/api/accounts", json={"name": "TS Other Checking"})).json()
+    r = await client.post(
+        "/api/transactions",
+        json={"txn_date": d.isoformat(), "description": "TS FRESH", "amount": "-8.37", "account_id": other["id"]},
+    )
+    assert r.status_code == 201
     sid = await _source("simplefin")
     feed = tiller.build_feed(
         [

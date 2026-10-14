@@ -91,14 +91,22 @@ _IMPORT_CANDIDATES = text(
      AND t.txn_date BETWEEN r.txn_date - CAST(:w AS integer) AND r.txn_date + CAST(:w AS integer)
      AND t.deleted_at IS NULL
     WHERE r.batch_id = :b AND r.decision = 'pending'
+      AND (NOT :same_account_only OR r.account_id IS NOT DISTINCT FROM t.account_id)
     """
 )
 
 
-async def detect_import_duplicates(session: AsyncSession, batch_id: int, window: int = WINDOW_DAYS) -> dict:
-    """Flag incoming rows that match existing transactions; exact matches are auto-skipped."""
+async def detect_import_duplicates(
+    session: AsyncSession, batch_id: int, window: int = WINDOW_DAYS, same_account_only: bool = False
+) -> dict:
+    """Flag incoming rows that match existing transactions; exact matches are auto-skipped.
+
+    same_account_only: the rows' accounts are certain (synced feeds), so a match in another account is the other leg
+    of a transfer, not a duplicate.
+    """
     best: dict[int, tuple[float, int, list[str], bool]] = {}
-    for r in (await session.execute(_IMPORT_CANDIDATES, {"b": batch_id, "w": window})).mappings():
+    params = {"b": batch_id, "w": window, "same_account_only": same_account_only}
+    for r in (await session.execute(_IMPORT_CANDIDATES, params)).mappings():
         sc, reasons = score_pair(r["dd"], r["same_acct"], float(r["sim"]), bool(r["exact"]))
         if sc >= THRESHOLD and (r["row_id"] not in best or sc > best[r["row_id"]][0]):
             best[r["row_id"]] = (sc, r["txn_id"], reasons, bool(r["exact"]))

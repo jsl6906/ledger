@@ -10,6 +10,7 @@ from sqlalchemy import String as SAString
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger.analytics.transfers import hidden_account, internal_transfer
 from ledger.db.engine import get_session
 from ledger.jobs.worker import enqueue, notify_worker
 from ledger.models import (
@@ -203,6 +204,14 @@ def _filtered(
     return conds
 
 
+def _visible(account_id: list[int] | None) -> list:
+    conds = [~internal_transfer()]
+    # Choosing an account explicitly shows its rows even when the account is hidden.
+    if not account_id:
+        conds.append(~hidden_account())
+    return conds
+
+
 @router.get("", response_model=TransactionPage)
 async def list_transactions(
     q: str | None = None,
@@ -219,6 +228,7 @@ async def list_transactions(
     import_batch_id: int | None = None,
     merchant: str | None = None,
     rule_id: int | None = None,
+    include_hidden: bool = False,
     sort: str = Query("date_desc", pattern=SORT_PATTERN),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -228,6 +238,8 @@ async def list_transactions(
         q, start, end, account_id, category_id, group_id, member_id, tag_id, status, min_amount, max_amount, import_batch_id,
         merchant, rule_id,
     )
+    if not include_hidden:
+        conds += _visible(account_id)
     agg = (
         await session.execute(
             select(
@@ -254,11 +266,14 @@ async def export_csv(
     status: Literal["all", "uncategorized", "suggested", "with_statement"] = "all",
     import_batch_id: int | None = None,
     merchant: str | None = None,
+    include_hidden: bool = False,
     session: AsyncSession = Depends(get_session),
 ):
     conds = _filtered(
         q, start, end, account_id, category_id, group_id, None, tag_id, status, None, None, import_batch_id, merchant
     )
+    if not include_hidden:
+        conds += _visible(account_id)
     by_date = select(Transaction).where(*conds).order_by(Transaction.txn_date.asc(), Transaction.id.asc())
     rows = (await session.scalars(by_date)).unique().all()
     buf = io.StringIO()

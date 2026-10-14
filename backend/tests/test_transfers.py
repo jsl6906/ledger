@@ -7,6 +7,7 @@ import pytest
 async def data(client):
     checking = (await client.post("/api/accounts", json={"name": "TT Checking"})).json()
     savings = (await client.post("/api/accounts", json={"name": "TT Savings", "account_type": "savings"})).json()
+    hidden = (await client.post("/api/accounts", json={"name": "TT Hidden", "is_hidden": True})).json()
     cats = {c["name"]: c for c in (await client.get("/api/categories")).json()}
     g = (await client.post("/api/category-groups", json={"name": "TT Group"})).json()
     misc = (await client.post("/api/categories", json={"name": "TT Misc", "group_id": g["id"]})).json()
@@ -29,6 +30,10 @@ async def data(client):
         "dup_a": await add("2019-02-24", "TT DUP 811", "-811.00", checking, transfer),
         "dup_b": await add("2019-02-26", "TT DUP 811", "-811.00", checking, transfer),
         "dup_in": await add("2019-02-26", "TT DUP IN 811", "811.00", savings),
+        "to_hidden": await add("2019-02-12", "TT TO HIDDEN 205", "-205.00", checking, transfer),
+        "in_hidden": await add("2019-02-12", "TT IN HIDDEN 205", "205.00", hidden),
+        "promo_out": await add("2019-02-14", "TT PROMO MOVED 88", "-88.00", checking, transfer),
+        "promo_in": await add("2019-02-14", "TT PROMO ENDED 88", "88.00", checking, transfer),
     }
     return rows
 
@@ -38,7 +43,7 @@ async def _feb(client) -> dict:
 
 
 async def test_transfer_matching(client, data):
-    from sqlalchemy import select
+    from sqlalchemy import select, text
 
     from ledger.analytics.anomalies import detect
     from ledger.db.engine import get_sessionmaker
@@ -58,11 +63,31 @@ async def test_transfer_matching(client, data):
     assert pairs[d["out2"]] == d["in2"] and pairs[d["dup_b"]] == d["dup_in"]
     assert pairs[d["gap"]] is None and pairs[d["hint"]] is None and pairs[d["hint_other"]] is None
     assert pairs[d["dup_a"]] is None
+    assert pairs[d["to_hidden"]] == d["in_hidden"]
+    assert pairs[d["promo_out"]] == d["promo_in"]  # same-day offset within one account
 
-    # Matched uncategorized legs drop out of reports; the categorized "other side" stays.
+    # Pairs between visible accounts drop out of reports; unmatched transfers and pairs with a hidden account count by sign.
     after = await _feb(client)
-    assert before["income"] - after["income"] == pytest.approx(731 + 811)
-    assert after["expenses"] == before["expenses"]
+    assert before["income"] - after["income"] == pytest.approx(731 + 312 + 811 + 88)
+    assert before["expenses"] - after["expenses"] == pytest.approx(731 + 312 + 811 + 88)
+
+    def listed(page: dict) -> set[int]:
+        return {t["id"] for t in page["items"]}
+
+    feb = {"start": "2019-02-01", "end": "2019-02-28", "q": "TT ", "limit": 1000}
+    shown = listed((await client.get("/api/transactions", params=feb)).json())
+    internal = {d[k] for k in ("out1", "in1", "out2", "in2", "dup_b", "dup_in", "promo_out", "promo_in")}
+    assert not shown & internal
+    assert {d[k] for k in ("gap", "hint", "dup_a", "to_hidden")} <= shown
+    assert d["in_hidden"] not in shown
+    everything = listed((await client.get("/api/transactions", params=feb | {"include_hidden": True})).json())
+    assert internal | {d["in_hidden"]} <= everything
+
+    # The chat views flag the same rows; hidden-account rows are never reportable.
+    async with get_sessionmaker()() as session:
+        sql = text("SELECT id, reportable FROM v_transactions WHERE id = ANY(:ids)")
+        reportable = dict((await session.execute(sql, {"ids": ids})).all())
+    assert {i for i, r in reportable.items() if not r} == internal | {d["in_hidden"]}
 
     flagged = [
         a

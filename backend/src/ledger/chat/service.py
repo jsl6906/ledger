@@ -24,10 +24,14 @@ SHEET_ROWS = 400
 SCHEMA_DOC = """Views (PostgreSQL; query only these):
 v_transactions(id, date, posted_date, description, merchant, amount, category, category_group, category_type,
   hidden_from_reports, account, account_type, institution, member, tags text[], notes, source,
-  budget_spread_months, date_added, has_statement)
+  budget_spread_months, date_added, has_statement, account_hidden, internal_transfer, reportable)
   - amount is signed: negative = money out, positive = money in.
   - category_type is 'expense' | 'income' | 'transfer' | NULL (uncategorized).
-v_monthly_category(month, category, category_group, category_type, hidden_from_reports, net_amount, transactions)
+  - internal_transfer = a matched transfer between two visible accounts (both legs are flagged).
+  - reportable = NOT hidden_from_reports AND NOT account_hidden AND NOT internal_transfer.
+v_monthly_category(month, category, category_group, category_type, hidden_from_reports, net_amount, transactions,
+  reportable)
+  - one row per month/category/reportable; filter reportable = true for report totals.
 v_categories(category, category_group, type, hidden_from_reports, is_active)
 v_accounts(account, account_type, institution, mask, is_closed, is_hidden)
 v_statements(id, series, vendor, document_type, status, statement_date, period_start, period_end, due_date,
@@ -46,11 +50,13 @@ tool; never guess numbers. Today is {today}.
 
 {schema}
 
-Conventions:
-- Spending = -sum(amount) over rows with category_type = 'expense' (refunds net out), plus uncategorized rows
-  (category_type IS NULL) with negative amounts when the question is about all spending.
-- Exclude category_type = 'transfer' and hidden_from_reports = true unless the user asks for them.
-- Income = sum(amount) where category_type = 'income'.
+Conventions (match the app's Reports):
+- Report totals use only reportable = true rows, unless the user asks about a hidden account, hidden category,
+  or transfers between their own accounts.
+- Spending = -sum(amount) over reportable rows with category_type = 'expense' (refunds net out), plus reportable rows
+  with category_type NULL or 'transfer' and negative amounts (money leaving the visible household).
+- Income = sum(amount) over reportable rows with category_type = 'income', plus reportable rows with category_type
+  NULL or 'transfer' and positive amounts.
 - Match merchants/categories case-insensitively (ILIKE) and check v_categories for exact names when unsure.
 - Utility usage (kWh, gallons, therms) lives in v_statement_usage / v_statements, linked to payments.
 - Use date_trunc('month', date) for monthly breakdowns; state the period you used.
@@ -60,8 +66,9 @@ Accounts: {accounts}
 Bill series: {series}
 
 Answer style: concise, lead with the answer, use $ with 2 decimals, short tables in Markdown when helpful,
-mention assumptions (e.g. excluded transfers). If a document is attached, read it and relate it to the ledger
-(e.g. find the matching payment, compare with prior periods). If data is missing, say so plainly."""
+mention assumptions (e.g. excluded internal transfers or hidden accounts). If a document is attached, read it and
+relate it to the ledger (e.g. find the matching payment, compare with prior periods). If data is missing, say so
+plainly."""
 
 RUN_SQL = types.FunctionDeclaration(
     name="run_sql",
@@ -89,7 +96,12 @@ async def _context(session: AsyncSession) -> dict:
     grouped: dict[str, list[str]] = {}
     for g, c in cats:
         grouped.setdefault(g, []).append(c)
-    accounts = (await session.scalars(select(Account.name).where(Account.is_closed.is_(False)))).all()
+    accounts = [
+        f"{name} (hidden)" if hidden else name
+        for name, hidden in await session.execute(
+            select(Account.name, Account.is_hidden).where(Account.is_closed.is_(False))
+        )
+    ]
     series = (await session.scalars(select(StatementSeries.name))).all()
     return {
         "today": date.today().isoformat(),

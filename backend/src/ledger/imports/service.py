@@ -311,7 +311,9 @@ async def prepare_batch(session: AsyncSession, batch: ImportBatch, progress=None
         if row.raw.get("Confidence") not in (None, "") and batch.source_type == "document":
             row.confidence = Decimal(str(row.raw["Confidence"]))
     await session.flush()
-    stats = await detect_import_duplicates(session, batch.id)
+    stats = await detect_import_duplicates(
+        session, batch.id, same_account_only=batch.origin in ("tiller", "simplefin")
+    )
     stats["category_aliases_learned"] = aliases
     stats["invalid"] = sum(1 for r in rows if r.decision == "invalid")
     stats["no_account"] = sum(1 for r in rows if r.decision != "invalid" and r.account_id is None)

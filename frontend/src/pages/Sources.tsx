@@ -220,7 +220,7 @@ function BalancesCard() {
   const accountGroups = new Map<string, { account: (typeof accounts.data)[number]; balance: (typeof b.accounts)[number]; signed: number; change: number | null }[]>()
   for (const account of accounts.data) {
     const balance = balanceBy.get(account.id)
-    if (account.is_closed || account.is_hidden || !balance || !Number(balance.balance)) continue
+    if (account.is_closed || !balance || !Number(balance.balance)) continue
     const liability = LIABILITIES.includes(account.account_type)
     const signed = liability ? -Math.abs(Number(balance.balance)) : Number(balance.balance)
     const change = balance.balance_30d_ago === null ? null : signed - (liability ? -Math.abs(balance.balance_30d_ago) : balance.balance_30d_ago)

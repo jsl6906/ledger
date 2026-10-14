@@ -35,5 +35,18 @@ for _ in $(seq 1 30); do
   [[ "$status" == "healthy" ]] && break
   sleep 5
 done
+
+if [[ "$status" == "healthy" ]]; then
+  current_id="$(docker image inspect -f '{{.Id}}' ledger:latest)"
+  old_ids="$(docker images ledger --no-trunc --format '{{.ID}}' | sort -u | grep -vxF "$current_id" || true)"
+  if [[ -n "$old_ids" ]]; then
+    echo "[INFO] Removing old ledger images:"
+    docker images ledger --no-trunc --format '{{.ID}}  {{.Repository}}:{{.Tag}}' | grep -vF "$current_id" || true
+    echo "$old_ids" | xargs docker image rm -f || echo "[WARN] Some old images could not be removed" >&2
+  fi
+else
+  echo "[WARN] ledger is not healthy (status: $status); keeping older images for rollback" >&2
+fi
+
 docker ps --filter name=ledger --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 docker logs --tail 15 ledger

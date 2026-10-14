@@ -132,7 +132,7 @@ function AccountView({ id }: { id: number }) {
       <YearTable rows={d.yearly} show={['received', 'spent', 'net']} />
       <AccountStatements accountId={id} />
       <Findings params={{ account_id: id }} />
-      <TxnList params={{ account_id: id, start: r.start }} month={r.month} onClearMonth={r.clearMonth} hide={['account']} />
+      <TxnList params={{ account_id: id, start: r.start, include_hidden: 'true' }} month={r.month} onClearMonth={r.clearMonth} hide={['account']} />
     </section>
   )
 }

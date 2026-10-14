@@ -254,7 +254,11 @@ async def apply_feed(session: AsyncSession, source: Source, feed: Feed) -> dict:
     from ledger.jobs.worker import enqueue
 
     kind = source.kind
-    accounts = {key: await ensure_account(session, kind, fa) for key, fa in feed.accounts.items()}
+    # Feed accounts whose ledger account was merged away; their history is already imported.
+    ignored = set((source.config or {}).get("ignored_accounts", []))
+    accounts = {
+        key: await ensure_account(session, kind, fa) for key, fa in feed.accounts.items() if key not in ignored
+    }
 
     for b in feed.balances:
         if b.account_key not in accounts:

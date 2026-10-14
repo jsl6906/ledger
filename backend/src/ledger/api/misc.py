@@ -1,10 +1,11 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ledger import auth
+from ledger.analytics.transfers import hidden_account, internal_transfer
 from ledger.db.engine import get_session
 from ledger.models import Account, Category, Job, Transaction
 from ledger.schemas import JobOut, LoginIn
@@ -62,10 +63,6 @@ async def summary(start: date = Query(...), end: date = Query(...), session: Asy
     live = Transaction.deleted_at.is_(None)
     in_period = [live, Transaction.txn_date >= start, Transaction.txn_date <= end]
     reportable = Category.hide_from_reports.is_not(True)
-    not_transfer = and_(
-        func.coalesce(Category.type, "") != "transfer",
-        or_(Transaction.transfer_match_id.is_(None), Transaction.category_id.is_not(None)),
-    )
     row = (
         await session.execute(
             select(
@@ -76,7 +73,12 @@ async def summary(start: date = Query(...), end: date = Query(...), session: Asy
             )
             .select_from(Transaction)
             .outerjoin(Category, Transaction.category_id == Category.id)
-            .where(*in_period, reportable, not_transfer)
+            .where(
+                *in_period,
+                reportable,
+                ~hidden_account(),
+                ~internal_transfer(),
+            )
         )
     ).one()
     last_txn = await session.scalar(select(func.max(Transaction.txn_date)).where(live))
