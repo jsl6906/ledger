@@ -116,7 +116,7 @@ async def test_question_reply_is_saved_on_transactions(client, monkeypatch):
         "get_settings",
         lambda: get_settings().model_copy(update={"mail_inbound_address": "me+ledger@example.com"}),
     )
-    await client.post("/api/members", json={"name": "RQ Sam", "initials": "RQM", "email": "rq-sam@example.com"})
+    await client.post("/api/members", json={"name": "RQ Sam", "initials": "RQS", "email": "rq-sam@example.com"})
     await client.post("/api/alerts/recipients", json={"email": ME, "name": "Me"})
     ids = []
     for d in ("RQ HARDWARE", "RQ HARDWARE 2"):

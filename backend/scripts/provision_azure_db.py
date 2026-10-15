@@ -1,7 +1,7 @@
 """Provision the Azure Postgres side for Ledger, run as the server's Entra admin (your `az login`).
 
-    uv run python scripts/provision_azure_db.py --check              # report only
-    uv run python scripts/provision_azure_db.py --principal ledger-app  # create/grant
+    uv run python scripts/provision_azure_db.py --host <server> --admin-user <entra admin> --check
+    uv run python scripts/provision_azure_db.py --host <server> --admin-user <entra admin> --principal ledger-app
 
 Creates the Postgres role for the app's Entra service principal, lets it create the
 personal_finances schema (migrations then own it), and creates the read-only chat role.
@@ -9,14 +9,13 @@ personal_finances schema (migrations then own it), and creates the read-only cha
 
 import argparse
 import asyncio
+import os
 
 import asyncpg
 from azure.identity import AzureCliCredential
 
-HOST = "your-server.postgres.database.azure.com"
 DB = "personal_storage"
 SCHEMA = "personal_finances"
-DEFAULT_ADMIN = "admin@example.onmicrosoft.com"
 SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 
 
@@ -24,19 +23,20 @@ def ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-async def connect(user: str, database: str) -> asyncpg.Connection:
+async def connect(host: str, user: str, database: str) -> asyncpg.Connection:
     token = AzureCliCredential().get_token(SCOPE).token
-    return await asyncpg.connect(host=HOST, user=user, password=token, database=database, ssl="require")
+    return await asyncpg.connect(host=host, user=user, password=token, database=database, ssl="require")
 
 
 async def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--admin-user", default=DEFAULT_ADMIN)
+    p.add_argument("--host", default=os.environ.get("DB_HOST"), required=not os.environ.get("DB_HOST"))
+    p.add_argument("--admin-user", default=os.environ.get("PG_ADMIN_USER"), required=not os.environ.get("PG_ADMIN_USER"))
     p.add_argument("--principal", default="ledger-app", help="Display name of the app's service principal")
     p.add_argument("--check", action="store_true")
     args = p.parse_args()
 
-    pg = await connect(args.admin_user, "postgres")
+    pg = await connect(args.host, args.admin_user, "postgres")
     try:
         print("connected as", await pg.fetchval("SELECT current_user"), "|", await pg.fetchval("SELECT version()"))
         role = await pg.fetchrow("SELECT rolname FROM pg_roles WHERE rolname = $1", args.principal)
@@ -47,7 +47,7 @@ async def main() -> None:
     finally:
         await pg.close()
 
-    db = await connect(args.admin_user, DB)
+    db = await connect(args.host, args.admin_user, DB)
     try:
         schema_owner = await db.fetchval("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = $1", SCHEMA)
         print(f"schema {SCHEMA}:", f"owned by {schema_owner}" if schema_owner else "missing")

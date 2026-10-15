@@ -1,7 +1,10 @@
-# Writes \\homeserver\Docker\ledger\.env from the local .env + .env.azure without printing secrets.
+# Writes <Share>\.env from the local .env + .env.azure without printing secrets.
+param(
+    [Parameter(Mandatory)][string]$Share,
+    [Parameter(Mandatory)][string]$BaseUrl
+)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$share = "\\homeserver\Docker\ledger"
 
 function Read-Env($path) {
     $h = [ordered]@{}
@@ -23,7 +26,7 @@ foreach ($k in $azure.Keys) { $lines += "$k=$($azure[$k])" }
 $lines += "", "APP_PASSWORD_HASH=$($local['APP_PASSWORD_HASH'])", "SESSION_SECRET=$session", "COOKIE_SECURE=false"
 $lines += "GEMINI_KEY=$($local['GEMINI_KEY'])", "RENTCAST_API_KEY=$($local['RENTCAST_API_KEY'])", "", "GOOGLE_SERVICE_ACCOUNT_FILE=/secrets/google-sa.json", ""
 foreach ($k in "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_FROM", "SMTP_PASSWORD") { $lines += "$k=$($local[$k])" }
-$lines += "APP_BASE_URL=http://homeserver:8470", "TZ=America/New_York"
+$lines += "APP_BASE_URL=$BaseUrl", "TZ=America/New_York"
 
 New-Item -ItemType Directory -Force "$share\secrets" | Out-Null
 [IO.File]::WriteAllText("$share\.env", ($lines -join "`n") + "`n")

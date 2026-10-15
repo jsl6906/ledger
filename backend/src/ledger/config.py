@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_ENV_FILES, env_file_encoding="utf-8-sig", extra="ignore")
 
     # Database
-    db_host: str = "your-server.postgres.database.azure.com"
+    db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "personal_storage"
     db_schema: str = "personal_finances"

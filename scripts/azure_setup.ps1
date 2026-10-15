@@ -1,6 +1,7 @@
 param(
-    [string]$AppName = "ledger-app",
-    [string]$Subscription = "00000000-0000-0000-0000-000000000000"
+    [Parameter(Mandatory)][string]$DbHost,
+    [Parameter(Mandatory)][string]$AdminUser,
+    [string]$AppName = "ledger-app"
 )
 # Creates the Entra service principal the container uses to log in to Azure Postgres,
 # registers it as a Postgres role, and writes its credentials to .env.azure (gitignored).
@@ -19,7 +20,7 @@ if ($existing) {
 if ($LASTEXITCODE -ne 0 -or -not $cred.appId) { throw "Service principal creation failed" }
 
 @"
-DB_HOST=your-server.postgres.database.azure.com
+DB_HOST=$DbHost
 DB_PORT=5432
 DB_NAME=personal_storage
 DB_SCHEMA=personal_finances
@@ -34,6 +35,6 @@ Write-Host "Wrote credentials to $out (merge into the server's .env)."
 
 Push-Location (Join-Path $root "backend")
 try {
-    uv run python scripts/provision_azure_db.py --principal $AppName
+    uv run python scripts/provision_azure_db.py --host $DbHost --admin-user $AdminUser --principal $AppName
     if ($LASTEXITCODE -ne 0) { throw "Database provisioning failed" }
 } finally { Pop-Location }

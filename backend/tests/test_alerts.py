@@ -229,7 +229,7 @@ async def test_ask_about_transactions(client, monkeypatch):
 
     monkeypatch.setattr(questions, "send_email", fake_send)
     monkeypatch.setattr(questions, "smtp_configured", lambda: True)
-    await client.post("/api/members", json={"name": "TQ Sam", "initials": "TQM", "email": "TQ-Sam@Example.com"})
+    await client.post("/api/members", json={"name": "TQ Sam", "initials": "TQS", "email": "TQ-Sam@Example.com"})
     await client.post("/api/alerts/recipients", json={"email": "tq-alex@example.com", "name": "TQ Alex"})
     people = {p["email"]: p["name"] for p in (await client.get("/api/alerts/people")).json()}
     assert people["tq-sam@example.com"] == "TQ Sam" and people["tq-alex@example.com"] == "TQ Alex"

@@ -13,3 +13,7 @@ frontend/dist/
 /logs/
 /design_docs/
 /app_guidelines.md
+/temp.md
+/deploy/deploy_instructions.md
+/backend/scripts/private/
+/backend/scripts/_tmp*.py

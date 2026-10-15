@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Load the newest image tar from container_files/ and recreate the ledger container.
-# Run on the server: bash /srv/docker/ledger/update_ledger.sh
+# Run on the server: bash <docker config dir>/ledger/update_ledger.sh
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TAR_DIR="$SCRIPT_DIR/container_files"

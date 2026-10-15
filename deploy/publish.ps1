@@ -1,5 +1,5 @@
-# Build the image on this PC and drop it on the homeserver share; then run update_ledger.sh on the server.
-param([string]$Share = "\\homeserver\Docker\ledger")
+# Build the image on this PC and drop it on the server's share; then run update_ledger.sh on the server.
+param([Parameter(Mandatory)][string]$Share)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $tag = "ledger:" + (Get-Date -Format "yyyyMMdd-HHmm")
@@ -21,4 +21,4 @@ Remove-Item $local
 # Copy with LF line endings so bash can run it
 $script = (Get-Content "$PSScriptRoot\update_ledger.sh" -Raw) -replace "`r`n", "`n"
 [IO.File]::WriteAllText("$Share\update_ledger.sh", $script)
-Write-Host "Saved $tar. On the server run: bash /srv/docker/ledger/update_ledger.sh"
+Write-Host "Saved $tar. On the server run update_ledger.sh from the ledger folder."
