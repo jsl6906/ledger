@@ -59,9 +59,15 @@ def outbox(monkeypatch):
     monkeypatch.setattr(alerts, "smtp_configured", lambda: True)
 
     async def no_ai(d):
-        return "A quiet week."
+        return alerts.DigestNarrative(
+            summary="A quiet week.",
+            budget="Groceries is on pace to run over.",
+            notable=["TAL STORE $420 is the largest charge."],
+            trends=[],
+            recommendations=["Hold back on <dining> for the rest of the month."],
+        )
 
-    monkeypatch.setattr(alerts, "_ai_summary", no_ai)
+    monkeypatch.setattr(alerts, "_ai_narrative", no_ai)
     return sent
 
 
@@ -168,6 +174,12 @@ async def test_weekly_digest(client, outbox):
     preview = (await client.get("/api/alerts/digest/preview")).json()
     assert preview["subject"].startswith("Ledger weekly digest")
     assert "The week" in preview["text"] and "<h3" in preview["html"]
+
+    async with get_sessionmaker()() as s:
+        d = await alerts.render_digest(s, date.today())
+    assert d["summary"] == "A quiet week."
+    assert "Recommendations\n- Hold back on <dining>" in d["text"] and "Trends" not in d["text"]
+    assert "<li" in d["html"] and "&lt;dining&gt;" in d["html"]
 
     async with get_sessionmaker()() as s:
         first = await alerts.send_digest(s, date(2031, 3, 3))

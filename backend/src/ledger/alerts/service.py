@@ -4,12 +4,13 @@ Each condition becomes an AlertEvent with a stable subject_key, so it is emailed
 evaluation run are batched into a single email.
 """
 
+import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import quote, urlencode
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -232,8 +233,65 @@ async def deliver(session: AsyncSession, events: list[AlertEvent], subject: str,
 
 
 # ---- weekly digest ----
-class _DigestNote(BaseModel):
-    summary: str
+TREND_WEEKS = 4
+TREND_MIN = 75.0
+
+
+class DigestNarrative(BaseModel):
+    summary: str = Field(description="2-3 sentence headline of the week.")
+    budget: str = Field(description="2-3 sentences on where this month's budgets stand.")
+    notable: list[str] = Field(description="Up to 4 short bullets on charges worth a look.")
+    trends: list[str] = Field(description="Up to 4 short bullets on meaningful spending changes.")
+    recommendations: list[str] = Field(description="Up to 3 concrete, actionable suggestions.")
+
+
+async def _notable_charges(session: AsyncSession, start: date, end: date, limit: int = 5) -> list[dict]:
+    sql = text(
+        f"""--sql
+        SELECT t.id, t.txn_date, coalesce(mp.display_name, t.description) AS name,
+               coalesce(c.name, 'Uncategorized') AS category, {EXPENSE} AS amount
+        {FROM}
+        LEFT JOIN merchant_profile mp ON mp.key = t.merchant
+        WHERE {REPORTABLE} AND t.txn_date BETWEEN :start AND :end AND {EXPENSE} > 0
+        ORDER BY amount DESC, t.id LIMIT :limit
+        """
+    )
+    return [
+        {"id": r.id, "date": r.txn_date, "name": r.name, "category": r.category, "amount": float(r.amount)}
+        for r in await session.execute(sql, {"start": start, "end": end, "limit": limit})
+    ]
+
+
+async def _category_trends(session: AsyncSession, end: date, limit: int = 6) -> list[dict]:
+    """Expense categories whose last 4 weeks differ most from the average 4 weeks over the 12 before."""
+    recent_start = end - timedelta(weeks=TREND_WEEKS)
+    sql = text(
+        f"""--sql
+        SELECT c.id AS category_id, coalesce(c.name, 'Uncategorized') AS category,
+               sum(CASE WHEN t.txn_date > :recent_start THEN {EXPENSE} ELSE 0 END) AS recent,
+               sum(CASE WHEN t.txn_date <= :recent_start THEN {EXPENSE} ELSE 0 END) / 3 AS baseline
+        {FROM}
+        WHERE {REPORTABLE} AND t.txn_date > :base_start AND t.txn_date <= :end
+        GROUP BY 1, 2
+        """
+    )
+    params = {"recent_start": recent_start, "base_start": recent_start - timedelta(weeks=3 * TREND_WEEKS), "end": end}
+    out = []
+    for r in await session.execute(sql, params):
+        recent, baseline = float(r.recent or 0), float(r.baseline or 0)
+        if max(recent, baseline) < TREND_MIN or abs(recent - baseline) < 0.25 * max(recent, baseline):
+            continue
+        out.append(
+            {
+                "category_id": r.category_id,
+                "category": r.category,
+                "last_4_weeks": round(recent, 2),
+                "typical_4_weeks": round(baseline, 2),
+                "change_pct": round((recent - baseline) / baseline * 100) if baseline else None,
+            }
+        )
+    out.sort(key=lambda t: -abs(t["last_4_weeks"] - t["typical_4_weeks"]))
+    return out[:limit]
 
 
 async def digest_data(session: AsyncSession, today: date) -> dict:
@@ -266,10 +324,15 @@ async def digest_data(session: AsyncSession, today: date) -> dict:
         "count": totals.n or 0,
         "categories": [c for c in await category_breakdown(session, start, end) if c["spent"] > 0][:5],
         "merchants": await top_merchants(session, start, end, limit=5),
+        "notable": await _notable_charges(session, start, end),
+        "trends": await _category_trends(session, end),
         "budget_period": month_period,
         "budget_label": month["period"]["label"],
+        "budget_elapsed": month["period"]["elapsed"],
         "budget_total": month["total"],
+        "budget_rows": [r for r in month["rows"] if r["kind"] == "expense" and r["budget"] > 0][:12],
         "budget_watch": watch[:6],
+        "unbudgeted": month["unbudgeted"][:5],
         "anomaly_count": await session.scalar(select(func.count()).select_from(Anomaly).where(Anomaly.status == "open")),
         "anomalies": [{"title": a.title, "detail": a.detail} for a in open_anomalies],
         "new_statements": await session.scalar(
@@ -293,38 +356,98 @@ async def digest_data(session: AsyncSession, today: date) -> dict:
     }
 
 
-async def _ai_summary(d: dict) -> str | None:
+NARRATIVE_SYSTEM = (
+    "You write the narrative part of a household's weekly finance email. The JSON facts cover the past week's "
+    "spending and income, a typical week (average of the 8 before), top categories and merchants, the week's largest "
+    "charges, this month's budgets (budget_elapsed = share of the month gone; projected = month-end at this pace), "
+    "unbudgeted spending, category trends (last 4 weeks vs the typical 4 weeks over the prior 12), open out-of-norm "
+    "findings and items waiting for review.\n"
+    "Use only these facts: never invent amounts, merchants, dates or causes. Be plain and specific, use $ amounts, "
+    "no greetings, filler or moralizing.\n"
+    "Pace projections assume steady spending: a budget whose actual is already close to (but not over) its amount is "
+    "usually a once-a-month bill that has been paid, so don't call it on pace to overspend. Likewise a 4-week window "
+    "can catch two monthly payments or none, so don't report rent, mortgage, loan, insurance or utility swings as "
+    "trends.\n"
+    "summary: the headline of the week, including how it compares with a typical week.\n"
+    "budget: where the month stands against budget given how much of it has passed, naming the categories that are "
+    "over or on pace to overspend; if there are no budgets, say so in one sentence.\n"
+    "notable: charges worth a second look (unusually large, new, one-off or flagged), each with merchant, amount and "
+    "why it stands out; empty if none.\n"
+    "trends: meaningful changes with direction and size; empty if none.\n"
+    "recommendations: concrete actions tied to the facts, e.g. a category to hold back on for the rest of the "
+    "month, a bill or charge to check, or items to review; empty if nothing warrants action."
+)
+
+
+def _row(r: dict, *keys: str) -> dict:
+    return {k: float(r[k]) if isinstance(r[k], Decimal) else r[k] for k in keys}
+
+
+def _narrative_facts(d: dict) -> str:
+    facts = {
+        "week": f"{d['start']} to {d['end']}",
+        "spent": round(d["spent"], 2),
+        "income": round(d["income"], 2),
+        "typical_week": round(d["weekly_avg"], 2),
+        "transactions": d["count"],
+        "top_categories": [_row(c, "category", "spent", "count") for c in d["categories"]],
+        "top_merchants": [{"merchant": m["example"], "spent": m["spent"], "count": m["count"]} for m in d["merchants"]],
+        "largest_charges": [_row(n, "date", "name", "category", "amount") for n in d["notable"]],
+        "budget_month": d["budget_label"],
+        "budget_elapsed": d["budget_elapsed"],
+        "budget_total": _row(d["budget_total"], "spent", "budget", "left", "over_count", "count"),
+        "budgets": [_row(r, "name", "actual", "budget", "projected", "status") for r in d["budget_rows"]],
+        "unbudgeted": [_row(u, "name", "actual") for u in d["unbudgeted"]],
+        "trends": [{k: v for k, v in t.items() if k != "category_id"} for t in d["trends"]],
+        "out_of_norm_findings": d["anomalies"],
+        "to_review": {
+            "open_findings": d["anomaly_count"],
+            "uncategorized_last_30_days": d["uncategorized"],
+            "possible_duplicates": d["duplicates"],
+            "statements_awaiting_review": d["statements_to_review"],
+        },
+    }
+    return json.dumps(facts, default=str)
+
+
+async def _ai_narrative(d: dict) -> DigestNarrative | None:
     if not get_settings().gemini_key:
         return None
     from ledger.ai.client import generate
 
-    facts = {
-        k: v
-        for k, v in d.items()
-        if k
-        in ("spent", "income", "weekly_avg", "count", "categories", "merchants", "budget_total", "budget_watch", "anomalies")
-    }
     try:
-        note: _DigestNote = await generate(
-            str(facts),
+        return await generate(
+            _narrative_facts(d),
             purpose="weekly_digest",
-            tier="lite",
-            schema=_DigestNote,
+            tier="main",
+            schema=DigestNarrative,
             temperature=0.3,
-            system="Write a 2-3 sentence plain summary of this household's past week of spending for a weekly email. "
-            "Mention how the week compares with the typical week and anything that needs attention. Use $ amounts. "
-            "No greetings, no advice lectures.",
+            system=NARRATIVE_SYSTEM,
         )
-        return note.summary.strip()
     except Exception:
-        log.exception("Digest summary failed")
+        log.exception("Digest narrative failed")
         return None
+
+
+def _narrative_blocks(n: DigestNarrative | None) -> list[tuple[str, str, list[str]]]:
+    """(heading, paragraph, bullets) for each non-empty part of the narrative after the headline."""
+    if n is None:
+        return []
+    blocks = [
+        ("Budget", n.budget.strip(), []),
+        ("Notable charges", "", [b.strip() for b in n.notable if b.strip()]),
+        ("Trends", "", [b.strip() for b in n.trends if b.strip()]),
+        ("Recommendations", "", [b.strip() for b in n.recommendations if b.strip()]),
+    ]
+    return [b for b in blocks if b[1] or b[2]]
 
 
 async def render_digest(session: AsyncSession, today: date, ai: bool = True) -> dict:
     d = await digest_data(session, today)
     label = f"{d['start']:%d %b} – {d['end']:%d %b %Y}"
-    summary = await _ai_summary(d) if ai else None
+    narrative = await _ai_narrative(d) if ai else None
+    summary = narrative.summary.strip() if narrative else None
+    blocks = _narrative_blocks(narrative)
     diff = d["spent"] - d["weekly_avg"]
     week = {"start": d["start"], "end": d["end"]}
     sections: list[tuple[str, list[tuple[str, str | None]]]] = [
@@ -364,6 +487,16 @@ async def render_digest(session: AsyncSession, today: date, ai: bool = True) -> 
             or [("—", None)],
         ),
     ]
+    if d["notable"]:
+        sections.append(
+            (
+                "Largest charges",
+                [
+                    (f"{n['date']:%d %b} · {n['name']} ({n['category']}): {money(n['amount'])}", f"/transactions/{n['id']}")
+                    for n in d["notable"]
+                ],
+            )
+        )
     bt = d["budget_total"]
     budget_lines = [(f"{money(bt['spent'])} of {money(bt['budget'])} budgeted so far.", "/budgets")] if bt["count"] else []
     budget_lines += [
@@ -399,8 +532,13 @@ async def render_digest(session: AsyncSession, today: date, ai: bool = True) -> 
         url = _url(link)
         return f"- {line}" + (f"\n  {url}" if url else "")
 
-    text_body = (f"{summary}\n\n" if summary else "") + "\n\n".join(
-        f"{h}\n" + "\n".join(text_line(*item) for item in lines) for h, lines in sections
+    def text_block(heading: str, paragraph: str, bullets: list[str]) -> str:
+        return f"{heading}\n" + (paragraph + "\n" if paragraph else "") + "".join(f"- {b}\n" for b in bullets)
+
+    text_body = (
+        (f"{summary}\n\n" if summary else "")
+        + "".join(text_block(*b) + "\n" for b in blocks)
+        + "\n\n".join(f"{h}\n" + "\n".join(text_line(*item) for item in lines) for h, lines in sections)
     )
     url = _url("/")
     if url:
@@ -417,6 +555,7 @@ async def render_digest(session: AsyncSession, today: date, ai: bool = True) -> 
     inner = (mail.card(mail.multiline(summary), tone) if summary else "") + kpis
     if week_url:
         inner += f'<div style="font-size:13px">{mail.link("See this week’s transactions →", week_url)}</div>'
+    inner += "".join(mail.prose(*b) for b in blocks)
     inner += "".join(mail.section(h, [(line, _url(link)) for line, link in lines]) for h, lines in sections[1:])
     inner += mail.button("Open Ledger", url)
     preheader = summary or f"Spent {money(d['spent'])} across {_n(d['count'], 'transaction')}."

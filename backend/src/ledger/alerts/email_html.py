@@ -97,6 +97,13 @@ def stats(items: list[tuple[str, str, str | None]]) -> str:
     )
 
 
+def _heading(text: str) -> str:
+    return (
+        f'<h3 style="margin:22px 0 4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{MUTED};'
+        f'font-weight:600">{esc(text)}</h3>'
+    )
+
+
 def section(heading: str, lines: list[tuple[str, str | None]]) -> str:
     rows = "".join(
         f'<tr><td style="padding:7px 0;border-bottom:1px solid {DIVIDER};font-size:14px;color:{TEXT}">'
@@ -104,10 +111,19 @@ def section(heading: str, lines: list[tuple[str, str | None]]) -> str:
         for text, url in lines
     )
     return (
-        f'<h3 style="margin:22px 0 4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{MUTED};'
-        f'font-weight:600">{esc(heading)}</h3>'
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-family:{FONT}">{rows}</table>'
+        _heading(heading)
+        + '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="font-family:{FONT}">{rows}</table>'
     )
+
+
+def prose(heading: str, paragraph: str = "", bullets: list[str] | None = None) -> str:
+    """A headed paragraph and/or bullet list of running text."""
+    body = f'<p style="margin:4px 0 0;font-size:14px;line-height:1.5;color:{TEXT}">{esc(paragraph)}</p>' if paragraph else ""
+    if bullets:
+        items = "".join(f'<li style="margin:0 0 4px">{esc(b)}</li>' for b in bullets)
+        body += f'<ul style="margin:6px 0 0;padding-left:20px;font-size:14px;line-height:1.5;color:{TEXT}">{items}</ul>'
+    return _heading(heading) + body
 
 
 def layout(*, kicker: str, heading: str, body: str, preheader: str = "", footer: str = "") -> str:
