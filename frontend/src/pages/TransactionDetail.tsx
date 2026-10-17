@@ -8,9 +8,10 @@ import { CategorySelect } from '../components/CategorySelect'
 import { AskPanel } from '../components/AskPanel'
 import { MerchantInput } from '../components/MerchantInput'
 import { RuleEditor } from '../components/RuleEditor'
+import { TagPicker } from '../components/TagPicker'
 import { Button, Card, ErrorNote, Field, Icon } from '../components/ui'
 import { fullDate, iso, money, monthName, parseIso, shortDate } from '../format'
-import { useAccounts, useMembers, useTags } from '../hooks'
+import { useAccounts, useMembers } from '../hooks'
 import { accountPath, categoryPath, merchantKey, merchantPath, txnPath } from '../links'
 import { ORIGINS } from '../review'
 import { ruleDraft } from '../rules'
@@ -220,7 +221,6 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
   const qc = useQueryClient()
   const accounts = useAccounts()
   const members = useMembers()
-  const tags = useTags()
   const [draft, setDraft] = useState<Draft>(() => toDraft(txn, { account_id: defaultAccountId ?? null }))
   const [rulePrompt, setRulePrompt] = usePrompt(txn?.id)
   const [asking, setAsking] = useState(false)
@@ -416,22 +416,10 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
 
       {!isNew && <NotesSection txnId={txn.id} />}
 
-      {(tags.data?.length ?? 0) > 0 && (
-        <div className="section-rule">
-          <div className="card-kicker">Tags</div>
-          <div className="row" style={{ gap: 6 }}>
-            {tags.data!.map((tg) => {
-              const on = draft.tag_ids.includes(tg.id)
-              return (
-                <button key={tg.id} type="button" className={`tag chip${on ? ' on' : ''}`}
-                  onClick={() => set('tag_ids', on ? draft.tag_ids.filter((x) => x !== tg.id) : [...draft.tag_ids, tg.id])}>
-                  {tg.name}
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      )}
+      <div className="section-rule">
+        <div className="card-kicker">Tags</div>
+        <TagPicker value={draft.tag_ids} onChange={(ids) => set('tag_ids', ids)} />
+      </div>
 
       <div className="section-rule">
         <div className="card-kicker">Budget treatment</div>

@@ -140,6 +140,14 @@ a:hover { color: var(--color-accent-900); }
 .budget-table tr.pace > td:first-child { box-shadow: inset 3px 0 0 var(--color-pace); }
 .chip { cursor: pointer; user-select: none; border: 1px solid var(--color-divider); background: transparent; font: inherit; }
 .chip.on { background: var(--color-accent-100); color: var(--color-accent-800); border-color: var(--color-accent-300); }
+.tag-picker { display: flex; flex-direction: column; gap: 6px; }
+.tag-picker .tag-picker-chip { gap: 6px; font-size: 12px; }
+.tag-picker-chip > span { opacity: 0.6; }
+.tag-picker-chip:hover > span { opacity: 1; }
+.tag-picker-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--color-divider); background: var(--color-surface); }
+.tag-picker-opt { padding: 6px 10px; font-size: 13px; cursor: pointer; }
+.tag-picker-opt.active { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.tag-picker-more { padding: 6px 10px; }
 select.input { appearance: auto; }
 .input.compact { min-height: 32px; padding: 4px 8px; width: auto; }
 

@@ -7,10 +7,11 @@ import {
 } from '../api'
 import { CategorySelect } from '../components/CategorySelect'
 import { StatementChecks } from '../components/StatementCheck'
+import { TagPicker } from '../components/TagPicker'
 import { Button, Card, ErrorNote, Field, ProgressBar, Seg, SortTh, TableCard } from '../components/ui'
 import { fullDate, money, shortDate } from '../format'
 import { txnPath } from '../links'
-import { useAccounts, useJob, useMembers, useTags } from '../hooks'
+import { useAccounts, useJob, useMembers } from '../hooks'
 import { ORIGINS, STATUS_TAG, pairConfidence } from '../review'
 import { numParam, oneOf, sortRows, useKeyedState, useUrl, useUrlSort } from '../urlState'
 import { Steps } from './Import'
@@ -63,7 +64,6 @@ function Wizard({ b }: { b: BatchDetail }) {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const members = useMembers()
-  const tags = useTags()
   const job = useJob(['extracting', 'preparing'].includes(b.status) ? b.job_id : null)
 
   const [mapping, setMapping] = useState<Record<string, ImportField>>(b.mapping)
@@ -338,21 +338,9 @@ function Wizard({ b }: { b: BatchDetail }) {
             <Field label="Notes">
               <input className="input" value={defaults.notes ?? ''} onChange={(e) => setDefaults({ ...defaults, notes: e.target.value || null })} />
             </Field>
-            {(tags.data?.length ?? 0) > 0 && (
-              <Field label="Tags">
-                <div className="row" style={{ gap: 6 }}>
-                  {tags.data!.map((t) => {
-                    const on = defaults.tag_ids.includes(t.id)
-                    return (
-                      <button key={t.id} type="button" className={`tag chip${on ? ' on' : ''}`}
-                        onClick={() => setDefaults({ ...defaults, tag_ids: on ? defaults.tag_ids.filter((x) => x !== t.id) : [...defaults.tag_ids, t.id] })}>
-                        {t.name}
-                      </button>
-                    )
-                  })}
-                </div>
-              </Field>
-            )}
+            <Field label="Tags">
+              <TagPicker value={defaults.tag_ids} onChange={(ids) => setDefaults({ ...defaults, tag_ids: ids })} />
+            </Field>
           </Card>
           <div className="stack-3">
             {isDoc && b.doc_meta && <DocMetaCard b={b} />}
