@@ -1,13 +1,13 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import case, func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ledger import auth
-from ledger.analytics.transfers import hidden_account, internal_transfer
+from ledger.analytics import reports
 from ledger.db.engine import get_session
-from ledger.models import Account, Category, Job, Transaction
+from ledger.models import Account, Job, Transaction
 from ledger.schemas import JobOut, LoginIn
 
 public = APIRouter(tags=["auth"])
@@ -61,34 +61,24 @@ async def cancel_job(job_id: int, session: AsyncSession = Depends(get_session)):
 @router.get("/summary", tags=["summary"])
 async def summary(start: date = Query(...), end: date = Query(...), session: AsyncSession = Depends(get_session)):
     live = Transaction.deleted_at.is_(None)
-    in_period = [live, Transaction.txn_date >= start, Transaction.txn_date <= end]
-    reportable = Category.hide_from_reports.is_not(True)
-    row = (
-        await session.execute(
-            select(
-                func.count(),
-                func.coalesce(func.sum(case((Transaction.amount < 0, -Transaction.amount), else_=0)), 0),
-                func.coalesce(func.sum(case((Transaction.amount > 0, Transaction.amount), else_=0)), 0),
-                func.count().filter(Transaction.category_id.is_(None)),
-            )
-            .select_from(Transaction)
-            .outerjoin(Category, Transaction.category_id == Category.id)
-            .where(
-                *in_period,
-                reportable,
-                ~hidden_account(),
-                ~internal_transfer(),
-            )
-        )
-    ).one()
+    # Same rules as the cash-flow report, so refunds net against spending instead of counting as income.
+    sql = f"""--sql
+        SELECT count(*) AS n,
+               coalesce(sum({reports.EXPENSE}), 0) AS spent,
+               coalesce(sum({reports.INCOME}), 0) AS income,
+               count(*) FILTER (WHERE t.category_id IS NULL) AS uncategorized
+        {reports.FROM}
+        WHERE {reports.REPORTABLE} AND t.txn_date BETWEEN :start AND :end
+    """
+    row = (await session.execute(text(sql), {"start": start, "end": end})).one()
     last_txn = await session.scalar(select(func.max(Transaction.txn_date)).where(live))
     accounts = await session.scalar(select(func.count()).select_from(Account).where(Account.is_closed.is_(False)))
     uncategorized_all = await session.scalar(select(func.count()).where(live, Transaction.category_id.is_(None)))
     return {
-        "count": row[0],
-        "spent": row[1],
-        "income": row[2],
-        "uncategorized": row[3],
+        "count": row.n,
+        "spent": row.spent,
+        "income": row.income,
+        "uncategorized": row.uncategorized,
         "uncategorized_all": uncategorized_all,
         "last_transaction": last_txn,
         "accounts": accounts,

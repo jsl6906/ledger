@@ -209,3 +209,29 @@ async def test_summary(client):
     s = (await client.get("/api/summary", params={"start": "2026-09-01", "end": "2026-09-30"})).json()
     assert s["count"] >= 2
     assert float(s["spent"]) > 0
+
+
+async def test_summary_matches_cashflow(client):
+    acct = (await client.post("/api/accounts", json={"name": "SM Checking"})).json()
+    g = (await client.post("/api/category-groups", json={"name": "SM Group"})).json()
+    shop = (await client.post("/api/categories", json={"name": "SM Shopping", "group_id": g["id"]})).json()
+    pay = (await client.post("/api/categories", json={"name": "SM Pay", "group_id": g["id"], "type": "income"})).json()
+    hidden_g = (await client.post("/api/category-groups", json={"name": "SM Hidden", "hide_from_reports": True})).json()
+    hidden = (await client.post("/api/categories", json={"name": "SM Hidden Cat", "group_id": hidden_g["id"]})).json()
+    for amt, cat in [("-100.00", shop), ("30.00", shop), ("500.00", pay), ("-20.00", pay), ("-999.00", hidden)]:
+        body = {
+            "txn_date": "2017-03-10",
+            "description": "SM TXN",
+            "amount": amt,
+            "account_id": acct["id"],
+            "category_id": cat["id"],
+        }
+        assert (await client.post("/api/transactions", json=body)).status_code == 201
+
+    period = {"start": "2017-03-01", "end": "2017-03-31"}
+    s = (await client.get("/api/summary", params=period)).json()
+    flow = (await client.get("/api/analytics/cashflow", params=period)).json()[0]
+    # Refunds net against spending, negative income nets against income, hidden groups drop out.
+    assert float(s["spent"]) == pytest.approx(70) and flow["expenses"] == pytest.approx(70)
+    assert float(s["income"]) == pytest.approx(480) and flow["income"] == pytest.approx(480)
+    assert s["count"] == 4

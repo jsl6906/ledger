@@ -42,12 +42,16 @@ async def _category_spikes(session: AsyncSession, month: date) -> list[dict]:
     for cid, by_month in hist.items():
         current = by_month.get(month, Decimal(0))
         prior = [by_month.get(add_months(month, -i), Decimal(0)) for i in range(1, 13)]
-        if sum(1 for v in prior if v > 0) < 4 or current < MIN_SPIKE:
+        active = [v for v in prior if v > 0]
+        if len(active) < 4 or current < MIN_SPIKE:
             continue
-        med, spread = robust(prior)
+        # Quarterly/occasional categories: compare with the months they were charged, not with the empty ones.
+        periodic = len(active) <= 8
+        med, spread = robust(active if periodic else prior)
         z = (current - med) / spread
         if z >= 3 and current >= med * Decimal("1.5"):
             ratio = f"{current / med:.1f}×" if med > 0 else "well above"
+            norm = "its usual amount in months it is charged" if periodic else "its monthly norm"
             out.append(
                 {
                     "kind": "category_spike",
@@ -58,8 +62,7 @@ async def _category_spikes(session: AsyncSession, month: date) -> list[dict]:
                     "baseline": med,
                     "score": z,
                     "title": f"{names.get(cid, 'Category')} · {month:%b %Y}",
-                    "detail": f"{names.get(cid, 'Category')} is {ratio} its monthly norm ({_money(med)}) "
-                    f"at {_money(current)}.",
+                    "detail": f"{names.get(cid, 'Category')} is {ratio} {norm} ({_money(med)}) at {_money(current)}.",
                 }
             )
     return out

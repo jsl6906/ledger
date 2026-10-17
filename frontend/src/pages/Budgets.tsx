@@ -117,9 +117,12 @@ export function Budgets() {
                     return <BudgetEditor key={r.budget_id} budget={b} hasOverall={hasOverall} onDone={() => { setEditing(null); refresh() }} />
                   }
                   const over = r.status === 'over'
+                  const inPeriod = elapsed > 0 && elapsed < 1
+                  const paid = inPeriod && r.recurring && r.status === 'ok' && r.actual > 0 && Number(r.bills_due) === 0
                   const note = [r.group, r.period_type !== period ? `${money(r.base_amount)}/${r.period_type}` : '',
                     r.allocated ? `${money(r.total_budget)} less ${money(r.allocated)} budgeted elsewhere` : '',
                     r.spread_amount ? `incl. ${money(r.spread_amount)} spread` : '',
+                    Number(r.bills_due) > 0 ? `~${money(r.bills_due)} in regular bills still to come` : '',
                     r.status === 'pace' ? `on pace for ${money(r.projected)}` : '', r.notes].filter(Boolean).join(' · ')
                   const tag = STATUS_TAG[r.status]
                   const txns = s && r.category_ids.length ? txnsPath({
@@ -132,6 +135,7 @@ export function Budgets() {
                         <div className="b-title">
                           {txns ? <Link to={txns} title={`Transactions · ${s?.period.label}`}>{r.name}</Link> : r.name}
                           {tag && <span className={`tag ${tag[0]}`}>{tag[1]} · {Math.round(r.pct)}%</span>}
+                          {paid && <span className="tag tag-neutral" title="This month's regular charges are in">Paid</span>}
                         </div>
                         {note && <div className="small muted-2">{note}</div>}
                         {r.category_names.length > 0 && (
@@ -141,7 +145,7 @@ export function Budgets() {
                           </div>
                         )}
                       </td>
-                      <td className="b-bar"><BudgetBar pct={r.pct} elapsed={elapsed} status={r.status} /></td>
+                      <td className="b-bar"><BudgetBar pct={r.pct} elapsed={r.recurring ? 0 : elapsed} status={r.status} /></td>
                       <td className="num b-spent" data-label="Spent">{money(r.actual)}</td>
                       <td className="num text-muted b-budget" data-label="Budget">{money(r.budget)}</td>
                       <td className={`num b-left${over ? ' text-over' : ''}`} data-label={over ? 'Over by' : 'Left'}>

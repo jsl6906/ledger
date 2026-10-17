@@ -37,6 +37,10 @@ async def data(client):
         await add(f"{m}-10", "TA BISTRO", f"-{95 + i % 3 * 5}.00", dining["id"])
     for m in ("2024-02", "2024-03", "2024-04", "2024-05"):
         await add(f"{m}-12", "TA HARDWARE", "-40.00", shop["id"])
+    water = (await client.post("/api/categories", json={"name": "TA Water", "group_id": g["id"]})).json()
+    for m, amt in (("2023-06", "-210.00"), ("2023-09", "-190.00"), ("2023-12", "-200.00"), ("2024-03", "-220.00")):
+        await add(f"{m}-20", "TA WATER DEPT", amt, water["id"])
+    await add("2024-06-20", "TA WATER DEPT", "-234.33", water["id"])
     await add("2024-06-03", "TA BISTRO", "-180.00", dining["id"])
     await add("2024-06-10", "TA STEAKHOUSE", "-220.00", dining["id"])
     await add("2024-06-12", "TA HARDWARE", "-180.00", shop["id"])
@@ -56,6 +60,8 @@ async def test_detect_anomalies(client, data):
 
     found = [a for a in (await client.get("/api/anomalies")).json() if a["period"] == "2024-06-01"]
     kinds = {a["kind"]: a for a in found}
+    # A quarterly bill is compared with the months it is charged, not the empty months between
+    assert "TA Water" not in {a["category_name"] for a in found if a["kind"] == "category_spike"}
     assert kinds["category_spike"]["category_name"] == "TA Dining"
     assert kinds["category_spike"]["amount"] == 400.0
     assert kinds["large_for_merchant"]["transaction_description"] == "TA HARDWARE"

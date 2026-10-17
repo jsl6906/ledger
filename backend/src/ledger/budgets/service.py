@@ -1,5 +1,6 @@
 """Budget evaluation with spreading: a transaction may count across N months (per-transaction override or rule)."""
 
+import statistics
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -91,6 +92,52 @@ async def actuals(session: AsyncSession, start: date, end: date) -> dict[int, tu
     return {r.category_id: (Decimal(r.net), Decimal(r.spread_part)) for r in rows}
 
 
+_CHARGES = text(
+    """--sql
+    SELECT t.category_id, CAST(date_trunc('month', t.txn_date) AS date) AS month,
+           count(*) AS n, sum(abs(t.amount)) AS total
+    FROM "transaction" t
+    JOIN category c ON c.id = t.category_id
+    WHERE t.deleted_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM account xa WHERE xa.id = t.account_id AND xa.is_hidden)
+      AND CASE WHEN c.type = 'income' THEN t.amount > 0 ELSE t.amount < 0 END
+      AND t.txn_date BETWEEN :start AND :end
+    GROUP BY 1, 2
+    """
+)
+
+BILL_LOOKBACK = 6
+BILL_TOLERANCE = Decimal("0.2")
+
+
+@dataclass
+class Bill:
+    monthly: Decimal
+    this_month: Decimal
+
+    def due(self, months_after: int) -> Decimal:
+        """What is still expected this month and in the period's later months."""
+        paid = self.this_month >= self.monthly * (1 - BILL_TOLERANCE)
+        return (Decimal(0) if paid else self.monthly - self.this_month) + self.monthly * months_after
+
+
+async def recurring_bills(session: AsyncSession, month: date) -> dict[int, Bill]:
+    """Categories that are a few charges adding up to about the same amount each month (mortgage, phone,
+    internet, cleaning...): within 20% of their median in at least 4 of the 6 months before `month`."""
+    by_cat: dict[int, dict[date, tuple[int, Decimal]]] = {}
+    params = {"start": add_months(month, -BILL_LOOKBACK), "end": add_months(month, 1) - timedelta(days=1)}
+    for r in await session.execute(_CHARGES, params):
+        by_cat.setdefault(r.category_id, {})[r.month] = (r.n, Decimal(r.total))
+    out = {}
+    for cid, months in by_cat.items():
+        past = [months.get(add_months(month, -i), (0, Decimal(0))) for i in range(1, BILL_LOOKBACK + 1)]
+        monthly = Decimal(str(statistics.median(t for _, t in past)))
+        steady = sum(1 for _, t in past if abs(t - monthly) <= monthly * BILL_TOLERANCE)
+        if monthly > 0 and steady >= BILL_LOOKBACK - 2 and statistics.median(n for n, _ in past) <= 3:
+            out[cid] = Bill(monthly, months.get(month, (0, Decimal(0)))[1])
+    return out
+
+
 def _q(v: Decimal) -> Decimal:
     return v.quantize(Decimal("0.01"))
 
@@ -104,6 +151,9 @@ async def budget_status(session: AsyncSession, period: Period, today: date) -> d
     budgets = (await session.scalars(select(Budget))).all()
     act = await actuals(session, period.start, period.end)
     elapsed = period.elapsed(today)
+    this_month = date(today.year, today.month, 1)
+    bills = await recurring_bills(session, this_month) if 0 < elapsed < 1 else {}
+    months_after = (period.end.year - today.year) * 12 + period.end.month - today.month
 
     def in_period(b: Budget) -> Decimal:
         return _q(b.amount * period.months / PERIOD_MONTHS[b.period_type])
@@ -148,11 +198,18 @@ async def budget_status(session: AsyncSession, period: Period, today: date) -> d
         budget = total_budget - allocated
         if kind == "expense":
             covered.update(members)
-        # Spread shares are fixed for the whole period, so only the rest is extrapolated by pace.
-        spread_actual = sign * spread
+        # Spread shares and recurring bills are known amounts; only the rest is extrapolated by pace.
+        fixed = [c for c in members if c in bills]
+        bills_due = sum((bills[c].due(months_after) for c in fixed), Decimal(0))
+        bills_actual = sign * sum((act[c][0] for c in fixed if c in act), Decimal(0))
+        spread_actual = sign * sum((act[c][1] for c in members if c in act and c not in bills), Decimal(0))
+        paced = actual - bills_actual - spread_actual
         projected = (
-            _q(spread_actual + (actual - spread_actual) / Decimal(str(elapsed))) if 0 < elapsed < 1 else _q(actual)
+            _q(bills_actual + bills_due + spread_actual + paced / Decimal(str(elapsed))) if 0 < elapsed < 1 else _q(actual)
         )
+        # Mostly regular bills: marking time elapsed against them is meaningless.
+        bills_monthly = sum((bills[c].monthly for c in fixed), Decimal(0))
+        recurring = budget > 0 and bills_monthly * period.months >= budget * Decimal("0.75")
         rows.append(
             {
                 "budget_id": b.id,
@@ -173,6 +230,8 @@ async def budget_status(session: AsyncSession, period: Period, today: date) -> d
                 "left": _q(budget - actual),
                 "pct": float(actual / budget * 100) if budget > 0 else 0.0,
                 "projected": projected,
+                "recurring": recurring,
+                "bills_due": _q(bills_due),
                 "spread_amount": _q(abs(spread)),
                 "notes": b.notes,
                 "status": "over" if actual > budget else ("pace" if projected > budget else "ok"),

@@ -103,3 +103,31 @@ async def test_budget_suggestions(client, cats):
     # Groceries now has no category budget (deleted above); insurance still does and is excluded
     assert by["TB Groceries"]["monthly_average"] == Decimal("150.00") and by["TB Groceries"]["suggested"] == 150
     assert "TB Insurance" not in by
+
+
+async def test_recurring_bill_projection(client):
+    from ledger.budgets.service import budget_status, period_for
+    from ledger.db.engine import get_sessionmaker
+
+    g = (await client.post("/api/category-groups", json={"name": "TB Bills", "type": "expense"})).json()
+    phone = (await client.post("/api/categories", json={"name": "TB Phone", "group_id": g["id"]})).json()
+    for m in ("2022-07", "2022-08", "2022-09", "2022-10", "2022-11", "2022-12", "2023-01"):
+        body = {"txn_date": f"{m}-03", "description": "TB MOBILE", "amount": "-80.00", "category_id": phone["id"]}
+        assert (await client.post("/api/transactions", json=body)).status_code == 201
+    b = (await client.post("/api/budgets", json={"category_id": phone["id"], "amount": "85"})).json()
+    try:
+        async with get_sessionmaker()() as session:
+            paid = await budget_status(session, period_for("month", date(2023, 1, 1)), date(2023, 1, 10))
+            due = await budget_status(session, period_for("month", date(2023, 2, 1)), date(2023, 2, 10))
+            quarter = await budget_status(session, period_for("quarter", date(2023, 1, 1)), date(2023, 1, 10))
+        # Paid on the 3rd: a third of the way in it is done for the month, not on pace for 3x
+        row = {r["name"]: r for r in paid["rows"]}["TB Phone"]
+        assert row["recurring"] and row["bills_due"] == 0 and row["projected"] == 80 and row["status"] == "ok"
+        # Before this month's charge lands, the usual amount is still expected
+        row = {r["name"]: r for r in due["rows"]}["TB Phone"]
+        assert row["actual"] == 0 and row["bills_due"] == 80 and row["projected"] == 80
+        # Later months in a quarter each expect one more charge
+        row = {r["name"]: r for r in quarter["rows"]}["TB Phone"]
+        assert row["bills_due"] == 160 and row["projected"] == 240 and row["status"] == "ok"
+    finally:
+        await client.delete(f"/api/budgets/{b['id']}")
