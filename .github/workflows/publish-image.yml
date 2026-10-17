@@ -1,41 +1,79 @@
 # Builds the repo's root Dockerfile and publishes it to ghcr.io/jsl6906/ledger.
-# Release: git tag v1.2.3 && git push origin v1.2.3  -> ghcr.io/jsl6906/ledger:1.2.3 (+ sha-<short>)
-# Then on the server: scripts/deploy_app.sh ledger 1.2.3
+# Every push to master auto-tags the next patch version (v1.2.3 -> v1.2.4) and publishes
+#   ghcr.io/jsl6906/ledger:1.2.4 (+ sha-<short>).
+# Minor/major bump: tag the commit yourself (git tag v1.3.0; git push origin master v1.3.0);
+#   the master run sees HEAD is already tagged and leaves the build to the tag run.
+# Then on the server: scripts/deploy_app.sh ledger 1.2.4
 # First publish only: GitHub -> Packages -> ledger -> Package settings -> Change visibility -> Public
 name: Publish image
 
 on:
   push:
+    branches: [master]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
+
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - uses: docker/setup-buildx-action@v3
+      - id: version
+        name: Resolve version tag
+        run: |
+          git fetch --tags --force
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          elif existing=$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n1) && [[ -n "$existing" ]]; then
+            if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+              echo "HEAD already tagged $existing; its tag push publishes it."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            tag="$existing"
+          else
+            latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1)
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            tag="v${major:-0}.${minor:-0}.$(( ${patch:-0} + 1 ))"
+            git tag "$tag"
+            # Tags pushed with GITHUB_TOKEN don't trigger workflows, so this run does the build.
+            git push origin "$tag"
+          fi
+          echo "Publishing $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@v3
+      - if: steps.version.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - if: steps.version.outputs.skip != 'true'
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
+        if: steps.version.outputs.skip != 'true'
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.tag }}
             type=sha,format=short
 
-      - uses: docker/build-push-action@v6
+      - if: steps.version.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
