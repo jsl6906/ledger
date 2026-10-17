@@ -103,6 +103,7 @@ class CategoryIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     group_id: int
     type: CategoryType = "expense"
+    sort_order: int = 0
     hide_from_reports: bool = False
     is_active: bool = True
     description: str | None = None

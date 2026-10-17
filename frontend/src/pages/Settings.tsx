@@ -1,9 +1,9 @@
-import type { UseQueryResult } from '@tanstack/react-query'
-import { ACCOUNT_TYPES } from '../api'
+import { useMutation, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
+import { ACCOUNT_TYPES, post } from '../api'
 import { CrudTable } from '../components/CrudTable'
 import { HierarchyEditor } from '../components/HierarchyEditor'
 import { SystemPanel } from '../components/SystemPanel'
-import { Seg } from '../components/ui'
+import { Button, Seg } from '../components/ui'
 import { useAccounts, useCategories, useGroups, useInstitutions, useMembers, useTags } from '../hooks'
 import { accountPath, categoryPath, groupPath } from '../links'
 import { oneOf, useUrl } from '../urlState'
@@ -25,6 +25,13 @@ export function Settings() {
   const groups = useGroups()
   const members = useMembers()
   const tags = useTags()
+  const qc = useQueryClient()
+  const resort = useMutation({
+    mutationFn: () => post('/categories/resort'),
+    onSuccess: () => {
+      for (const k of ['category-groups', 'categories', 'details']) qc.invalidateQueries({ queryKey: [k] })
+    },
+  })
 
   return (
     <section className="page">
@@ -76,7 +83,14 @@ export function Settings() {
           parentKey="group_id"
           parents={(groups.data ?? []) as unknown as Row[]}
           items={(categories.data ?? []) as unknown as Row[]}
-          error={groups.error || categories.error}
+          error={groups.error || categories.error || resort.error}
+          actions={
+            <Button variant="ghost" disabled={resort.isPending}
+              title="Order groups, and categories within each group, by number of transactions (most first)"
+              onClick={() => confirm('Re-number the sort order of all groups and categories by transaction count?') && resort.mutate()}>
+              {resort.isPending ? 'Resorting…' : 'Resort by frequency'}
+            </Button>
+          }
           parent={{
             label: 'Group', path: '/category-groups', queryKey: 'category-groups', detail: groupPath,
             columns: [
@@ -93,10 +107,11 @@ export function Settings() {
               { key: 'name', label: 'Category', kind: 'text', required: true },
               { key: 'type', label: 'Type', kind: 'select', required: true, options: TYPE_OPTIONS },
               { key: 'description', label: 'Description', kind: 'text' },
+              { key: 'sort_order', label: 'Sort', kind: 'number', width: 90 },
               { key: 'hide_from_reports', label: 'Hidden from reports', kind: 'bool' },
               { key: 'is_active', label: 'Active', kind: 'bool' },
             ],
-            defaults: { name: '', group_id: null, type: 'expense', hide_from_reports: false, is_active: true, description: null },
+            defaults: { name: '', group_id: null, type: 'expense', sort_order: 0, hide_from_reports: false, is_active: true, description: null },
             badges: (r) => [...(r.hide_from_reports ? ['Hidden from reports'] : []), ...(r.is_active ? [] : ['Inactive'])],
           }}
           dim={{ label: 'Show inactive', noun: 'inactive', test: (r) => !r.is_active }}

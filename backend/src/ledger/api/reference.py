@@ -60,6 +60,7 @@ def _category_out(c: Category) -> CategoryOut:
         name=c.name,
         group_id=c.group_id,
         type=c.type,
+        sort_order=c.sort_order,
         hide_from_reports=c.hide_from_reports,
         is_active=c.is_active,
         description=c.description,
@@ -198,10 +199,39 @@ async def delete_group(obj_id: int, session: AsyncSession = Depends(get_session)
 async def list_categories(session: AsyncSession = Depends(get_session)):
     rows = (
         await session.scalars(
-            select(Category).join(Category.group).order_by(CategoryGroup.sort_order, CategoryGroup.name, Category.name)
+            select(Category)
+            .join(Category.group)
+            .order_by(CategoryGroup.sort_order, CategoryGroup.name, Category.sort_order, Category.name)
         )
     ).all()
     return [_category_out(c) for c in rows]
+
+
+@router.post("/categories/resort", status_code=204)
+async def resort_categories(session: AsyncSession = Depends(get_session)):
+    """Order groups, and categories within each group, by live transaction count (most first; ties by name)."""
+    counts = dict(
+        (
+            await session.execute(
+                select(Transaction.category_id, func.count())
+                .where(Transaction.deleted_at.is_(None), Transaction.category_id.is_not(None))
+                .group_by(Transaction.category_id)
+            )
+        ).all()
+    )
+    groups = (await session.scalars(select(CategoryGroup))).all()
+    cats = (await session.scalars(select(Category))).all()
+    by_group: dict[int, list[Category]] = {g.id: [] for g in groups}
+    for c in cats:
+        by_group[c.group_id].append(c)
+    group_total = {gid: sum(counts.get(c.id, 0) for c in kids) for gid, kids in by_group.items()}
+    for i, g in enumerate(sorted(groups, key=lambda g: (-group_total[g.id], g.name.lower())), 1):
+        g.sort_order = i * 10
+    for kids in by_group.values():
+        for i, c in enumerate(sorted(kids, key=lambda c: (-counts.get(c.id, 0), c.name.lower())), 1):
+            c.sort_order = i * 10
+    await _commit(session)
+    return Response(status_code=204)
 
 
 @router.post("/categories", response_model=CategoryOut, status_code=201)

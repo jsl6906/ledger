@@ -37,7 +37,7 @@ async def _taxonomy(session) -> tuple[str, set[int]]:
             select(Category.id, Category.name, Category.type, CategoryGroup.name)
             .join(CategoryGroup)
             .where(Category.is_active)
-            .order_by(CategoryGroup.sort_order, Category.name)
+            .order_by(CategoryGroup.sort_order, CategoryGroup.name, Category.sort_order, Category.name)
         )
     ).all()
     return "\n".join(f"{i}: {g} > {n} ({t})" for i, n, t, g in rows), {r[0] for r in rows}

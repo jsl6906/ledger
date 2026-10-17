@@ -1,9 +1,12 @@
 import io
 import zipfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 
+from ledger.ai.pricing import estimate_cost
 from ledger.db.engine import get_sessionmaker
 from ledger.maintenance import cleanup
 from ledger.models import AiCallLog, Attachment, ChatMessage, ChatSession, Job
@@ -47,12 +50,46 @@ async def test_ai_usage(client):
             [
                 AiCallLog(purpose="th_test", model="m1", input_tokens=100, output_tokens=20, latency_ms=300, ok=True),
                 AiCallLog(purpose="th_test", model="m1", ok=False, error="boom", latency_ms=50),
+                AiCallLog(
+                    purpose="th_cost",
+                    model="gemini-3.5-flash-lite",
+                    input_tokens=1000,
+                    output_tokens=200,
+                    thinking_tokens=300,
+                    cost_usd=Decimal("0.00155"),
+                    ok=True,
+                ),
+                AiCallLog(
+                    purpose="th_cost",
+                    model="gemini-3.5-flash-lite",
+                    input_tokens=1000,
+                    output_tokens=0,
+                    cost_usd=Decimal("0.0003"),
+                    ok=True,
+                ),
             ]
         )
         await s.commit()
     data = (await client.get("/api/ai-usage", params={"days": 1})).json()
     item = next(i for i in data["items"] if i["purpose"] == "th_test")
     assert item["calls"] == 2 and item["errors"] == 1 and item["input_tokens"] == 100
+    assert item["cost_usd"] is None and item["unpriced_calls"] == 1
+    priced = next(i for i in data["items"] if i["purpose"] == "th_cost")
+    assert priced["thinking_tokens"] == 300 and priced["unpriced_calls"] == 0
+    assert priced["cost_usd"] == pytest.approx(0.00185)
+
+
+def test_estimate_cost():
+    # flash-lite: 0.30 in / 2.50 out (thinking billed as output) / 0.03 cached per 1M tokens
+    assert estimate_cost("gemini-3.5-flash-lite", 1000, 200, 300) == Decimal("0.001550")
+    assert estimate_cost("models/gemini-3.5-flash-lite-001", 1_000_000, 0, cached_tokens=400_000) == Decimal("0.192000")
+    # flash promo pricing ends with 2026
+    assert estimate_cost("gemini-3.8-flash", 1_000_000, 0, on=date(2026, 12, 31)) == Decimal("0.750000")
+    assert estimate_cost("gemini-3.8-flash", 1_000_000, 0, on=date(2027, 1, 1)) == Decimal("1.500000")
+    # pro bills the whole call at the long-context rate past 200k prompt tokens
+    assert estimate_cost("gemini-3.1-pro-preview", 200_000, 1000) == Decimal("0.412000")
+    assert estimate_cost("gemini-3.1-pro-preview", 200_001, 1000) == Decimal("0.818004")
+    assert estimate_cost("some-other-model", 1000, 1000) is None
 
 
 async def test_cleanup_prunes_old_rows_only(client):

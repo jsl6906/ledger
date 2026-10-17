@@ -65,7 +65,7 @@ class CategoryGroup(TimestampMixin, Base):
     hide_from_reports: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     categories: Mapped[list["Category"]] = relationship(
-        back_populates="group", order_by="Category.name", passive_deletes="all"
+        back_populates="group", order_by=lambda: [Category.sort_order, Category.name], passive_deletes="all"
     )
 
 
@@ -75,6 +75,7 @@ class Category(TimestampMixin, Base):
     group_id: Mapped[int] = mapped_column(ForeignKey("category_group.id", ondelete="RESTRICT"))
     name: Mapped[str] = mapped_column(String(100), unique=True)
     type: Mapped[str] = mapped_column(String(20), default="expense")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     hide_from_reports: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     description: Mapped[str | None] = mapped_column(Text)

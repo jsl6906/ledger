@@ -102,6 +102,10 @@ async def ai_usage(days: int = Query(30, ge=1, le=365), session: AsyncSession = 
             func.count().filter(AiCallLog.ok.is_(False)),
             func.coalesce(func.sum(AiCallLog.input_tokens), 0),
             func.coalesce(func.sum(AiCallLog.output_tokens), 0),
+            func.coalesce(func.sum(AiCallLog.thinking_tokens), 0),
+            func.sum(AiCallLog.cost_usd),
+            # successful calls with no price (model missing from ledger.ai.pricing), so the cost is a floor
+            func.count().filter(AiCallLog.ok.is_(True), AiCallLog.cost_usd.is_(None)),
             func.avg(AiCallLog.latency_ms),
         )
         .where(AiCallLog.created_at >= since)
@@ -116,9 +120,12 @@ async def ai_usage(days: int = Query(30, ge=1, le=365), session: AsyncSession = 
             "errors": e,
             "input_tokens": int(i),
             "output_tokens": int(o),
+            "thinking_tokens": int(t),
+            "cost_usd": float(cost) if cost is not None else None,
+            "unpriced_calls": unpriced,
             "avg_latency_ms": round(float(lat)) if lat is not None else None,
         }
-        for p, m, n, e, i, o, lat in rows
+        for p, m, n, e, i, o, t, cost, unpriced, lat in rows
     ]
     last_error = await session.scalar(
         select(AiCallLog.error).where(AiCallLog.ok.is_(False), AiCallLog.created_at >= since).order_by(AiCallLog.id.desc())

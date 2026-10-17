@@ -34,6 +34,8 @@ type Props = {
   dim?: { label: string; noun: string; test: (row: Row) => boolean }
   summary?: (children: Row[]) => string
   error?: unknown
+  /** Extra controls shown beside the "Add" button. */
+  actions?: ReactNode
 }
 
 type Edit = { level: 'parent' | 'child'; id: number | 'new' }
@@ -47,7 +49,7 @@ function cellText(row: Row, col: Column): string {
   return String(v)
 }
 
-export function HierarchyEditor({ parent, child, parentKey, parents, items, orphanLabel, dim, summary, error }: Props) {
+export function HierarchyEditor({ parent, child, parentKey, parents, items, orphanLabel, dim, summary, error, actions }: Props) {
   const qc = useQueryClient()
   const [edit, setEdit] = useState<Edit | null>(null)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
@@ -175,7 +177,10 @@ export function HierarchyEditor({ parent, child, parentKey, parents, items, orph
         <button type="button" className="link-btn small" onClick={() => setCollapsed(new Set(sections.map((s) => s.id)))}>Collapse all</button>
         <button type="button" className="link-btn small" onClick={() => setCollapsed(new Set())}>Expand all</button>
       </div>
-      <Button onClick={() => start('parent', null)} disabled={editing('parent', 'new')}>Add {parent.label.toLowerCase()}</Button>
+      <div className="row">
+        {actions}
+        <Button onClick={() => start('parent', null)} disabled={editing('parent', 'new')}>Add {parent.label.toLowerCase()}</Button>
+      </div>
     </div>
   )
 

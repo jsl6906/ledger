@@ -90,7 +90,7 @@ async def _context(session: AsyncSession) -> dict:
             select(CategoryGroup.name, Category.name)
             .join(Category.group)
             .where(Category.is_active)
-            .order_by(CategoryGroup.sort_order, Category.name)
+            .order_by(CategoryGroup.sort_order, CategoryGroup.name, Category.sort_order, Category.name)
         )
     ).all()
     grouped: dict[str, list[str]] = {}

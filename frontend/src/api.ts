@@ -64,7 +64,7 @@ export interface Account {
 export interface Member { id: number; name: string; initials: string; email: string | null }
 export interface CategoryGroup { id: number; name: string; type: CategoryType; sort_order: number; hide_from_reports: boolean }
 export interface Category {
-  id: number; name: string; group_id: number; group_name: string; type: CategoryType
+  id: number; name: string; group_id: number; group_name: string; type: CategoryType; sort_order: number
   hide_from_reports: boolean; is_active: boolean; description: string | null
 }
 export interface Tag { id: number; name: string; color: string | null }
@@ -402,7 +402,7 @@ export interface AccountDetail extends EntityDetail {
 }
 export interface CategoryDetail extends EntityDetail, CategoryLinks {
   category: {
-    id: number; name: string; type: CategoryType; group_id: number; group_name: string; description: string | null
+    id: number; name: string; type: CategoryType; group_id: number; group_name: string; sort_order: number; description: string | null
     hide_from_reports: boolean; is_active: boolean
   }
   budget: BudgetInfo | null; merchants: BreakdownRow[]; accounts: BreakdownRow[]

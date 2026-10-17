@@ -53,6 +53,33 @@ async def test_category_rename_keeps_alias(client, refs):
     assert (await client.put(f"/api/categories/{cat['id']}", json=body | {"name": "Renamed Api"})).status_code == 200
 
 
+async def test_resort_categories_by_frequency(client, refs):
+    quiet = (await client.post("/api/category-groups", json={"name": "RS Quiet", "sort_order": -100})).json()
+    busy = (await client.post("/api/category-groups", json={"name": "RS Busy", "sort_order": 100})).json()
+    await client.post("/api/categories", json={"name": "RS Unused", "group_id": quiet["id"]})
+    low = (await client.post("/api/categories", json={"name": "RS Alpha", "group_id": busy["id"]})).json()
+    high = (await client.post("/api/categories", json={"name": "RS Zulu", "group_id": busy["id"]})).json()
+
+    async def txn(cat_id: int) -> int:
+        body = {"txn_date": "2026-09-01", "description": "RS test", "amount": "-1.00", "category_id": cat_id}
+        r = await client.post("/api/transactions", json=body | {"account_id": refs["acct"]["id"]})
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    for _ in range(2):
+        await txn(high["id"])
+    await txn(low["id"])
+    for _ in range(2):  # deleted rows don't count
+        assert (await client.delete(f"/api/transactions/{await txn(low['id'])}")).status_code == 204
+
+    assert (await client.post("/api/categories/resort")).status_code == 204
+    groups = [g["name"] for g in (await client.get("/api/category-groups")).json()]
+    assert groups.index("RS Busy") < groups.index("RS Quiet")
+    cats = [c["name"] for c in (await client.get("/api/categories")).json() if c["group_id"] == busy["id"]]
+    assert cats == ["RS Zulu", "RS Alpha"]
+    assert all(g["sort_order"] > 0 for g in (await client.get("/api/category-groups")).json())
+
+
 async def test_transaction_crud_and_rule_learning(client, refs):
     acct_id = refs["acct"]["id"]
     groceries = refs["cats"]["Groceries"]["id"]

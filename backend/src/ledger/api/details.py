@@ -357,6 +357,7 @@ async def category_detail(
                 "type": c.type,
                 "group_id": c.group_id,
                 "group_name": c.group.name,
+                "sort_order": c.sort_order,
                 "description": c.description,
                 "hide_from_reports": c.hide_from_reports or c.group.hide_from_reports,
                 "is_active": c.is_active,
@@ -377,7 +378,11 @@ async def group_detail(
     if g is None:
         raise HTTPException(404, "Category group not found")
     out = await _common(session, "group", group_id, start, end)
-    cats = (await session.scalars(select(Category).where(Category.group_id == group_id).order_by(Category.name))).all()
+    cats = (
+        await session.scalars(
+            select(Category).where(Category.group_id == group_id).order_by(Category.sort_order, Category.name)
+        )
+    ).all()
     ids = [c.id for c in cats]
     budgets = (await session.scalars(select(Budget).where(Budget.category_id.in_(ids or [0])))).all()
     by_cat = {b.category_id: _budget(b) for b in budgets}

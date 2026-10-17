@@ -9,6 +9,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
+from ledger.ai.pricing import estimate_cost
 from ledger.config import get_settings
 from ledger.db.engine import get_sessionmaker
 from ledger.models import AiCallLog
@@ -45,14 +46,23 @@ def model_for(tier: Tier) -> str:
 
 async def _log_call(purpose: str, model: str, started: float, resp, error: str | None) -> None:
     usage = getattr(resp, "usage_metadata", None)
+    tokens_in = getattr(usage, "prompt_token_count", None)
+    tokens_out = getattr(usage, "candidates_token_count", None)
+    tokens_thinking = getattr(usage, "thoughts_token_count", None)
     try:
+        cost = None
+        if usage is not None:
+            cached = getattr(usage, "cached_content_token_count", None)
+            cost = estimate_cost(model, tokens_in, tokens_out, tokens_thinking, cached)
         async with get_sessionmaker()() as session:
             session.add(
                 AiCallLog(
                     purpose=purpose,
                     model=model,
-                    input_tokens=getattr(usage, "prompt_token_count", None),
-                    output_tokens=getattr(usage, "candidates_token_count", None),
+                    input_tokens=tokens_in,
+                    output_tokens=tokens_out,
+                    thinking_tokens=tokens_thinking,
+                    cost_usd=cost,
                     latency_ms=int((time.monotonic() - started) * 1000),
                     ok=error is None,
                     error=error,
