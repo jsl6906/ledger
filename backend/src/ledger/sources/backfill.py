@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ledger.imports.parsing import detect_kind, mapping_complete, parse_date
 from ledger.imports.service import (
     ImportError_,
+    balance_confirms_rows,
     commit_batch,
     extract_into_batch,
     load_spreadsheet,
@@ -234,13 +235,28 @@ async def _import_statement(session: AsyncSession, bf: BackfillFile, att: Attach
     await prepare_batch(session, batch)
     meta = batch.doc_meta or {}
     accounts = meta.get("accounts") or []
-    off = [a for a in accounts if a.get("reconciliation") and not a["reconciliation"]["reconciles"]]
+    account_map = batch.defaults.get("account_map") or {}
+    balanced = bf.kind not in ("investment_statement", "loan_statement")
+    off = [
+        a
+        for a in accounts
+        if balanced
+        and a.get("reconciliation")
+        and not a["reconciliation"]["reconciles"]
+        and await balance_confirms_rows(session, a.get("account_type"), account_map.get(a["ref"]))
+    ]
     recon = meta.get("reconciliation")
     gate = None
     if off:
         r = off[0]["reconciliation"]
         gate = f"{_account_label(off[0])} rows sum to {r['sum_of_rows']} but its balance changed by {r['balance_change']}"
-    elif recon and not recon.get("reconciles"):
+    elif (
+        balanced
+        and not any(a.get("reconciliation") for a in accounts)
+        and recon
+        and not recon.get("reconciles")
+        and await balance_confirms_rows(session, meta.get("account_type"), batch.defaults.get("account_id"))
+    ):
         gate = f"Rows sum to {recon['sum_of_rows']} but balances changed by {recon['balance_change']}"
     elif meta.get("low_confidence_rows"):
         gate = f"{meta['low_confidence_rows']} hard-to-read rows to check"

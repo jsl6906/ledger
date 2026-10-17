@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -585,19 +585,36 @@ async def _suggest_account(session: AsyncSession, institution: str | None, last4
         if len(ids) == 1:
             return ids[0]
     if institution:
-        ids = (
-            await session.scalars(
-                select(Account.id)
-                .join(Institution, Account.institution_id == Institution.id, isouter=True)
-                .where(
-                    (Institution.name.ilike(f"%{institution}%")) | (Account.name.ilike(f"%{institution}%")),
-                    Account.is_closed.is_(False),
-                )
+        q = (
+            select(Account.id)
+            .join(Institution, Account.institution_id == Institution.id, isouter=True)
+            .where(
+                (Institution.name.ilike(f"%{institution}%")) | (Account.name.ilike(f"%{institution}%")),
+                Account.is_closed.is_(False),
             )
-        ).all()
+        )
+        if last4:
+            # The institution's only account is another account when its own number differs (e.g. a second 529).
+            q = q.where(or_(Account.mask.is_(None), func.right(Account.mask, 4) == last4[-4:]))
+        ids = (await session.scalars(q)).all()
         if len(ids) == 1:
             return ids[0]
     return None
+
+
+# Balances on these accounts move with the market or with accrued interest and escrow, so a statement's balance change
+# can't confirm that its rows are complete.
+BALANCE_ONLY_TYPES = frozenset({"investment", "retirement", "loan", "mortgage"})
+
+
+async def balance_confirms_rows(session: AsyncSession, statement_type: str | None, account_id: int | None) -> bool:
+    """Whether a statement account's rows should add up to its balance change (`statement_type` as read from the
+    document, `account_id` the ledger account it goes to)."""
+    if statement_type in BALANCE_ONLY_TYPES:
+        return False
+    if account_id:
+        return await session.scalar(select(Account.account_type).where(Account.id == account_id)) not in BALANCE_ONLY_TYPES
+    return True
 
 
 def _reconcile(total: Decimal, opening: float | None, closing: float | None) -> dict | None:

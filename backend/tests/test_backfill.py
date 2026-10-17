@@ -129,7 +129,7 @@ async def test_local_backfill_end_to_end(client, inbox, fake_ai):
 
     # The bill was filed after the statement, so it found and linked the payment
     async with get_sessionmaker()() as s:
-        acct = await s.scalar(select(Account).where(Account.name == "TB Bank ···5291"))
+        acct = await s.scalar(select(Account).where(Account.name == "TB Bank Â·Â·Â·5291"))
         assert acct is not None and acct.mask == "5291"
         water = await s.scalar(select(Transaction).where(Transaction.description == "CITY WATER UTIL"))
         assert water.account_id == acct.id and water.source_type == "backfill" and water.txn_date == date(2019, 1, 25)
@@ -287,6 +287,74 @@ async def test_scheduled_scan_resumes_finished_backfill(client, monkeypatch):
         await s.execute(delete(BackfillFile).where(BackfillFile.external_id == "auto-new"))
         await s.execute(delete(AppSetting).where(AppSetting.key == backfill.SETTINGS_KEY))
         await s.commit()
+
+
+@pytest.mark.parametrize(
+    ("kind", "account_type", "flagged"),
+    [
+        ("investment_statement", "investment", False),  # market moves: the balance can't confirm the rows
+        ("loan_statement", "loan", False),  # accrued interest and escrow
+        ("bank_statement", "checking", True),
+    ],
+)
+async def test_statement_gate_skips_balance_check_where_balances_drift(client, monkeypatch, kind, account_type, flagged):
+    from ledger.imports.service import store_attachment
+
+    last4 = {"investment": "7101", "loan": "7102", "checking": "7103"}[account_type]
+
+    async def extract(data, mime, filename):
+        return ai_imports.ExtractedStatement(
+            document_type=kind,
+            institution="Drift Co",
+            account_last4=last4,
+            account_type=account_type,
+            period_start="2020-03-01",
+            period_end="2020-03-31",
+            opening_balance=1000.0,
+            closing_balance=1173.55,
+            sign_note="test",
+            summary="Drift statement",
+            transactions=[
+                ai_imports.ExtractedTxn(date="2020-03-16", description="DRIFT DIVIDEND", amount=11.23, confidence=0.99)
+            ],
+        )
+
+    async def no_pairs(pairs):
+        return {}
+
+    monkeypatch.setattr(ai_imports, "extract_statement", extract)
+    monkeypatch.setattr(ai_imports, "adjudicate_pairs", no_pairs)
+    async with get_sessionmaker()() as s:
+        att = await store_attachment(s, f"%PDF-1.4 drift {kind}".encode(), f"drift_{kind}.pdf", None, source="backfill")
+        bf = BackfillFile(provider="local", external_id=f"drift-{kind}", name=att.filename, kind=kind, attachment_id=att.id)
+        s.add(bf)
+        await s.flush()
+        await backfill.import_file(s, bf, await backfill.load_settings(s))
+        await s.commit()
+        if flagged:
+            assert bf.status == "review" and "rows sum to 11.23" in bf.message, bf.message
+        else:
+            assert bf.status == "done", bf.message
+            [check] = (await client.get(f"/api/imports/{bf.import_batch_id}/checks")).json()
+            assert check["trusted"] is None and check["status"] == "ok", check
+
+
+async def test_statement_account_not_guessed_from_another_number(client):
+    from ledger.imports.service import _suggest_account
+    from ledger.models import Institution
+
+    async with get_sessionmaker()() as s:
+        inst = Institution(name="Guard Savings Plan")
+        s.add(inst)
+        await s.flush()
+        acct = Account(name="Guard 2036", institution_id=inst.id, account_type="investment", mask="4045", external_refs={})
+        s.add(acct)
+        await s.flush()
+        assert await _suggest_account(s, "Guard Savings Plan", "4045") == acct.id
+        assert await _suggest_account(s, "Guard Savings Plan", None) == acct.id
+        # A statement for a different portfolio at the same institution isn't this account.
+        assert await _suggest_account(s, "Guard Savings Plan", "3621") is None
+        await s.rollback()
 
 
 def test_drive_folder_ids():

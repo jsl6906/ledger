@@ -206,18 +206,41 @@ async def check_batch(session: AsyncSession, batch: ImportBatch) -> list[dict]:
         if len(refs) == 1:
             ref = refs[0]
             recon = by_ref[ref].get("reconciliation") if accounts else meta.get("reconciliation")
+            stype = by_ref[ref].get("account_type") if accounts else meta.get("account_type")
             out.append(
                 await _check_account(
-                    session, batch, ref, groups.get(ref, []), links, period, recon, mapped, not accounts, twins
+                    session,
+                    batch,
+                    ref,
+                    groups.get(ref, []),
+                    links,
+                    period,
+                    recon,
+                    mapped,
+                    not accounts,
+                    twins,
+                    statement_type=stype,
                 )
             )
             continue
         # Cards on one account (e.g. an authorised user's) share its balance, so they're checked together.
         rows_ = [r for ref in refs for r in groups.get(ref, [])]
         recon = _joint_reconciliation([by_ref[ref] for ref in refs], groups)
+        stype = next((by_ref[ref].get("account_type") for ref in refs if by_ref[ref].get("account_type")), None)
         out.append(
             await _check_account(
-                session, batch, "+".join(refs), rows_, links, period, recon, acct, False, twins, account=acct
+                session,
+                batch,
+                "+".join(refs),
+                rows_,
+                links,
+                period,
+                recon,
+                acct,
+                False,
+                twins,
+                account=acct,
+                statement_type=stype,
             )
         )
     return out
@@ -299,10 +322,12 @@ async def _check_account(
     legacy: bool,
     twins: list[int],
     account: int | None = None,
+    statement_type: str | None = None,
 ) -> dict:
     """`mapped`: the ledger account chosen for this statement account at import; `legacy`: the document was read
     before statements were split by account, so its rows may span several accounts; `twins`: other committed imports
-    of the same file; `account`: the ledger account already resolved for these rows."""
+    of the same file; `account`: the ledger account already resolved for these rows; `statement_type`: the account
+    type read from the statement."""
     review = batch.status == "review"
     valid = _valid(rows)
     trusted = None if not recon else bool(recon.get("reconciles"))
@@ -346,6 +371,10 @@ async def _check_account(
         result["detail"]["message"] = "Choose the ledger account for this statement account"
         return result
     result["account_id"] = account_id
+    from ledger.imports.service import balance_confirms_rows
+
+    if trusted is not None and not await balance_confirms_rows(session, statement_type, account_id):
+        trusted = result["trusted"] = None
 
     dates = [s.date for s in S] or list(period)
     ps, pe = period[0] or min(dates), period[1] or max(dates)
