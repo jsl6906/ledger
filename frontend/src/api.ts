@@ -346,7 +346,7 @@ export interface CategoryRow {
 export interface Trend { months: string[]; series: { id: number | null; name: string; total: number; values: number[] }[] }
 /** Filter for /analytics/contributors; in ids/exclude, 0 means Uncategorized. */
 export type ContribParams = {
-  start: string; end: string; basis?: 'reports' | 'all'; kind?: 'expense' | 'income'; level?: 'group' | 'category'
+  start: string; end: string; basis?: 'reports' | 'all' | 'budget'; kind?: 'expense' | 'income'; level?: 'group' | 'category'
   ids?: number[]; exclude?: number[]; account_id?: number; merchant?: string
 }
 export interface Contributors {

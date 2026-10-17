@@ -69,7 +69,7 @@ async def category_trend(
 async def contributors(
     start: date,
     end: date,
-    basis: Literal["reports", "all"] = "reports",
+    basis: Literal["reports", "all", "budget"] = "reports",
     kind: Literal["expense", "income"] | None = None,
     level: Literal["group", "category"] = "category",
     ids: list[int] | None = Query(None),

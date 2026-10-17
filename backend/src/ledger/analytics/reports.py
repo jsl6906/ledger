@@ -182,11 +182,12 @@ async def contributors(
 ) -> dict:
     """Top merchants and largest transactions behind one aggregate (a bar, a segment, a month).
 
-    basis "reports" applies the Reports filters (no transfers/hidden); "all" matches the detail pages. In ids/exclude,
-    0 stands for Uncategorized.
+    basis "reports" applies the Reports filters (no transfers/hidden); "all" matches the detail pages; "budget" matches
+    budget actuals (only hidden accounts excluded). In ids/exclude, 0 stands for Uncategorized.
     """
     col = "coalesce(g.id, 0)" if level == "group" else "coalesce(c.id, 0)"
-    conds = [REPORTABLE if basis == "reports" else "t.deleted_at IS NULL", "t.txn_date BETWEEN :start AND :end"]
+    visible = {"reports": REPORTABLE, "budget": f"t.deleted_at IS NULL AND NOT {HIDDEN_ACCOUNT}"}
+    conds = [visible.get(basis, "t.deleted_at IS NULL"), "t.txn_date BETWEEN :start AND :end"]
     params: dict = {"start": start, "end": end, "limit": limit}
     if kind:
         conds.append(f"(c.type = :kind OR ({BY_SIGN} AND t.amount {'>' if kind == 'income' else '<'} 0))")

@@ -8,6 +8,7 @@ import { iso, money, parseIso } from '../format'
 import { useGroups } from '../hooks'
 import { categoryPath, txnsPath } from '../links'
 import { oneOf, sortRows, useUrl, useUrlSort } from '../urlState'
+import { budgetTip, tipHandlers, useTip, type TipSpec } from '../tip'
 
 function shift(on: string, period: PeriodType, dir: number): string {
   const d = parseIso(on)
@@ -15,11 +16,14 @@ function shift(on: string, period: PeriodType, dir: number): string {
   return iso(new Date(d.getFullYear(), d.getMonth() + dir * months, 1))
 }
 
-export function BudgetBar({ pct, elapsed, status }: { pct: number; elapsed: number; status: BudgetRow['status'] }) {
+export function BudgetBar({ pct, elapsed, status, tip }: {
+  pct: number; elapsed: number; status: BudgetRow['status']; tip?: () => TipSpec | null
+}) {
+  const t = useTip()
   return (
-    <div className={`progress budget-bar ${status}`}>
+    <div className={`progress budget-bar ${status}`} {...(tip ? tipHandlers(t, tip) : {})}>
       <div style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
-      {elapsed > 0 && elapsed < 1 && <span className="elapsed" style={{ left: `${elapsed * 100}%` }} title="Time elapsed in period" />}
+      {elapsed > 0 && elapsed < 1 && <span className="elapsed" style={{ left: `${elapsed * 100}%` }} title={tip ? undefined : 'Time elapsed in period'} />}
     </div>
   )
 }
@@ -96,7 +100,10 @@ export function Budgets() {
                 </div>
               </div>
               <BudgetBar pct={s.total.budget ? (s.total.spent / s.total.budget) * 100 : 0} elapsed={elapsed}
-                status={s.total.left < 0 ? 'over' : 'ok'} />
+                status={s.total.left < 0 ? 'over' : 'ok'}
+                tip={() => budgetTip({ name: 'Expense budgets', spent: s.total.spent, budget: s.total.budget,
+                  pct: s.total.budget ? (s.total.spent / s.total.budget) * 100 : 0, status: s.total.left < 0 ? 'over' : 'ok',
+                  categoryIds: [...new Set(expense.flatMap((r) => r.category_ids))] }, s.period)} />
             </Card>
           )}
           <TableCard foot={
@@ -145,7 +152,9 @@ export function Budgets() {
                           </div>
                         )}
                       </td>
-                      <td className="b-bar"><BudgetBar pct={r.pct} elapsed={r.recurring ? 0 : elapsed} status={r.status} /></td>
+                      <td className="b-bar"><BudgetBar pct={r.pct} elapsed={r.recurring ? 0 : elapsed} status={r.status}
+                        tip={s ? () => budgetTip({ name: r.name, spent: r.actual, budget: r.budget, pct: r.pct, status: r.status,
+                          projected: r.projected, spread: r.spread_amount, categoryIds: r.category_ids }, s.period, r.recurring ? 0 : elapsed) : undefined} /></td>
                       <td className="num b-spent" data-label="Spent">{money(r.actual)}</td>
                       <td className="num text-muted b-budget" data-label="Budget">{money(r.budget)}</td>
                       <td className={`num b-left${over ? ' text-over' : ''}`} data-label={over ? 'Over by' : 'Left'}>

@@ -76,6 +76,12 @@ async def test_budget_status_with_spreading(client, cats):
     assert g_row["actual"] == 450  # 550 group spend minus insurance's 100
     assert g_row["category_names"] == ["TB Groceries"]
     assert rows["TB Insurance"]["actual"] == 100 and rows["TB Insurance"]["category_names"] == []
+    # Hovering a budget bar lists the period's own transactions behind its categories (spread shares aren't rows)
+    period = {"start": s["period"]["start"], "end": s["period"]["end"]}
+    tip = (
+        await client.get("/api/analytics/contributors", params={**period, "basis": "budget", "ids": g_row["category_ids"]})
+    ).json()
+    assert tip["count"] == 4 and tip["out"] == 870.0 and tip["in"] == 20.0
 
     # Overall budget: net of the group budget (which already contains the insurance budget)
     ob = (await client.post("/api/budgets", json={"amount": "1000"})).json()

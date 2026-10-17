@@ -10,6 +10,7 @@ import { fullDate, iso, money, moneyRound, monthEnd, monthLabel, parseIso, short
 import { useAccounts, useAnomalies, useBalanceTrend } from '../hooks'
 import { accountPath, categoryPath, groupPath, txnPath } from '../links'
 import { BudgetBar } from './Budgets'
+import { budgetTip } from '../tip'
 
 // Always listed on the dashboard (category or group budget names).
 const PINNED_BUDGETS = ['Shopping', 'Restaurants & Fast Food', 'Groceries']
@@ -42,7 +43,8 @@ export function Dashboard() {
     const spent = Number(bs.total.spent)
     const total = Number(bs.total.budget)
     const status: BudgetRow['status'] = spent > total ? 'over' : projected > total ? 'pace' : 'ok'
-    return { spent, total, status, pct: total > 0 ? (spent / total) * 100 : 0 }
+    return { spent, total, status, projected, pct: total > 0 ? (spent / total) * 100 : 0,
+      categoryIds: [...new Set(expenseRows.flatMap((r) => r.category_ids))] }
   })() : null
   const flow = useQuery({ queryKey: ['analytics', 'cashflow', 12], queryFn: () => get<CashflowMonth[]>('/analytics/cashflow', { months: 12 }) })
   const anomalies = useAnomalies()
@@ -106,11 +108,12 @@ export function Dashboard() {
           </div>
           <Link to="/budgets" className="btn btn-ghost">All budgets</Link>
         </div>
-        <div className="stack-3">
+        <div className="budget-list">
           {overall && (
             <div className="budget-row" style={{ fontWeight: 600 }}>
               <div><Link to="/budgets">All spending</Link></div>
-              <BudgetBar pct={overall.pct} elapsed={bs?.period.elapsed ?? 0} status={overall.status} />
+              <BudgetBar pct={overall.pct} elapsed={bs?.period.elapsed ?? 0} status={overall.status}
+                tip={bs ? () => budgetTip({ name: 'All spending', budget: overall.total, ...overall }, bs.period) : undefined} />
               <div className={`nowrap${overall.status === 'over' ? ' text-over' : ''}`} style={{ fontVariantNumeric: 'tabular-nums' }}>
                 {moneyRound(overall.spent)} / {moneyRound(overall.total)}
               </div>
@@ -120,7 +123,9 @@ export function Dashboard() {
             <div key={r.budget_id} className="budget-row">
               <div>{r.category_id ? <Link to={categoryPath(r.category_id)}>{r.name}</Link>
                 : r.group_id ? <Link to={groupPath(r.group_id)}>{r.name}</Link> : r.name}</div>
-              <BudgetBar pct={r.pct} elapsed={bs?.period.elapsed ?? 0} status={r.status} />
+              <BudgetBar pct={r.pct} elapsed={bs?.period.elapsed ?? 0} status={r.status}
+                tip={bs ? () => budgetTip({ name: r.name, spent: r.actual, budget: r.budget, pct: r.pct, status: r.status,
+                  projected: r.projected, spread: r.spread_amount, categoryIds: r.category_ids }, bs.period) : undefined} />
               <div className={`nowrap${r.status === 'over' ? ' text-over' : ''}`} style={{ fontVariantNumeric: 'tabular-nums' }}>
                 {moneyRound(r.actual)} / {moneyRound(r.budget)}
               </div>

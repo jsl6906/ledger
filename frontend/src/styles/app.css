@@ -49,7 +49,11 @@ a:hover { color: var(--color-accent-900); }
 .chat-layout { grid-template-columns: 220px minmax(0, 1fr); gap: var(--space-6); flex: 1; }
 .chat-pane { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: var(--space-4); max-width: 880px; min-width: 0;
   height: calc(100vh - 240px); }
+/* Rows share the list's columns via subgrid so every bar is the same width regardless of amount text. */
+.budget-list { display: grid; grid-template-columns: 160px 1fr auto; gap: var(--space-3) 12px; }
+.budget-list > :not(.budget-row) { grid-column: 1 / -1; }
 .budget-row { display: grid; grid-template-columns: 160px 1fr auto; gap: 12px; align-items: center; font-size: 13px; }
+.budget-list > .budget-row { grid-column: 1 / -1; grid-template-columns: subgrid; }
 .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-2) var(--space-3); }
 .spacer { flex: 1; }
 
@@ -127,6 +131,8 @@ a:hover { color: var(--color-accent-900); }
 .tag-over { background: var(--color-over-bg); color: var(--color-over); font-weight: 600; }
 .tag-pace { background: var(--color-pace-bg); color: var(--color-pace); font-weight: 600; }
 .budget-bar { height: 10px; }
+/* Taller invisible hover target for the bar's tooltip. */
+.budget-bar::before { content: ''; position: absolute; inset: -6px 0; }
 .budget-bar.pace > div { background: var(--color-pace); }
 .budget-bar.over > div { background: var(--color-over); }
 .budget-bar > .elapsed { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; background: var(--color-text); }
@@ -258,7 +264,7 @@ fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
   .step.on { flex: 3; }
   .step:not(.on) .step-label { display: none; }
 
-  .budget-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .budget-list, .budget-row { grid-template-columns: minmax(0, 1fr) auto; }
   .budget-row > .progress { grid-column: 1 / -1; grid-row: 2; }
 
   /* Budget table rows become stacked cards: name/actions, full-width bar, then labelled amounts. */
