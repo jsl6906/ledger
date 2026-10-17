@@ -318,7 +318,7 @@ export interface AlertEvent {
 }
 export interface AlertStatus {
   smtp_configured: boolean; smtp_host: string | null; smtp_from: string | null; app_base_url: string | null
-  digest_weekday: string; recipients: number
+  digest_weekday: string; digest_lag_days: number; recipients: number
   /** Replies to emailed questions reach the app's inbox and are saved as notes. */
   replies_saved: boolean
 }

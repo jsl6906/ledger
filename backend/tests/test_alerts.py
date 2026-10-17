@@ -182,6 +182,10 @@ async def test_weekly_digest(client, outbox):
     assert "<li" in d["html"] and "&lt;dining&gt;" in d["html"]
 
     async with get_sessionmaker()() as s:
+        week = await alerts.digest_data(s, date(2031, 3, 7))
+    assert (week["start"], week["end"]) == (date(2031, 2, 24), date(2031, 3, 2))  # Friday send -> prior Mon-Sun
+
+    async with get_sessionmaker()() as s:
         first = await alerts.send_digest(s, date(2031, 3, 3))
         again = await alerts.send_digest(s, date(2031, 3, 5))
     assert first["status"] == "sent" and again["status"] == "already_sent"
@@ -227,7 +231,7 @@ async def test_emails_link_into_the_app(client, outbox, monkeypatch):
     assert f'href="{base}/alerts"' in sent["html"]
 
     async with get_sessionmaker()() as s:
-        d = await alerts.render_digest(s, today + timedelta(days=1), ai=False)
+        d = await alerts.render_digest(s, today + timedelta(days=1 + settings.digest_lag_days), ai=False)
     assert f"{base}/transactions?start=" in d["text"] and f'href="{base}/merchants?key=' in d["html"]
 
 

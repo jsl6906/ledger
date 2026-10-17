@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     smtp_password: SecretStr | None = None
     smtp_from: str | None = None
     smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
-    digest_weekday: Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"] = "mon"
+    digest_weekday: Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"] = "fri"
+    # The digest covers the 7 days ending this many days before it is sent, so late-posting card charges have
+    # landed (Tiller history: ~60% of a week's spend is in by the next morning, ~95% after 4 days).
+    digest_lag_days: int = Field(default=4, ge=0, le=14)
     app_base_url: str | None = None  # used for links in emails, e.g. http://homeserver:8470
 
     # Inbound email: bills/receipts forwarded to a mailbox the app polls over IMAP

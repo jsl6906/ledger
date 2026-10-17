@@ -295,7 +295,7 @@ async def _category_trends(session: AsyncSession, end: date, limit: int = 6) -> 
 
 
 async def digest_data(session: AsyncSession, today: date) -> dict:
-    end = today - timedelta(days=1)
+    end = today - timedelta(days=1 + get_settings().digest_lag_days)
     start = end - timedelta(days=6)
     base_start = start - timedelta(days=56)
     sql = text(

@@ -79,7 +79,7 @@ export function Alerts() {
               padding: 'var(--space-3) var(--space-4)', borderBottom: '1px solid var(--color-divider)', alignItems: 'center' }}>
               <div className="stack" style={{ gap: 4 }}>
                 <div style={{ fontWeight: 500 }}>{TITLES[kind]}</div>
-                <div className="muted-2" style={{ fontSize: 13 }}><RuleDescription rule={r} weekday={s?.digest_weekday} /></div>
+                <div className="muted-2" style={{ fontSize: 13 }}><RuleDescription rule={r} weekday={s?.digest_weekday} lagDays={s?.digest_lag_days} /></div>
                 {kind === 'budget_overspend' && (
                   <label className="row small" style={{ gap: 6 }}>
                     <input type="checkbox" checked={r.params.pace !== false}
@@ -153,7 +153,7 @@ function resultNote(j: Job): string {
   return r.status ? ` — ${r.status.replace('_', ' ')}` : ''
 }
 
-function RuleDescription({ rule, weekday }: { rule: AlertRule; weekday?: string }) {
+function RuleDescription({ rule, weekday, lagDays }: { rule: AlertRule; weekday?: string; lagDays?: number }) {
   switch (rule.kind) {
     case 'budget_overspend':
       return <>When any category passes 100% of its period budget{rule.params.pace !== false ? ', or is on pace to by period end' : ''}.</>
@@ -162,7 +162,10 @@ function RuleDescription({ rule, weekday }: { rule: AlertRule; weekday?: string 
     case 'large_transaction':
       return <>Any single debit over the threshold that isn’t a known recurring payment.</>
     default:
-      return <>{DAYS[weekday ?? 'mon']} morning summary: spend vs a typical week, budgets, and items to review.</>
+      return <>
+        {DAYS[weekday ?? 'fri']} morning summary of the 7 days ending {lagDays ? `${lagDays + 1} days earlier, once late-posting charges have landed` : 'the day before'}:
+        spend vs a typical week, budgets, and items to review.
+      </>
   }
 }
 

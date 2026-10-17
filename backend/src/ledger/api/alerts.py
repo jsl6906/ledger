@@ -28,6 +28,7 @@ async def status(session: AsyncSession = Depends(get_session)):
         "smtp_from": s.smtp_from or s.smtp_username,
         "app_base_url": s.app_base_url,
         "digest_weekday": s.digest_weekday,
+        "digest_lag_days": s.digest_lag_days,
         "recipients": len(await active_recipients(session)),
         "replies_saved": questions.replies_saved(),
     }
