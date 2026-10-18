@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ledger.analytics.balances import LIABILITIES
+from ledger.analytics.balances import LIABILITIES, account_balances, week_points
 from ledger.config import get_settings
 from ledger.crypto import encrypt
 from ledger.db.engine import get_session
@@ -248,20 +248,14 @@ async def balance_history(
 
 @router.get("/balances/trend")
 async def balance_trend(days: int = Query(365, ge=30, le=3650), session: AsyncSession = Depends(get_session)):
-    """Last balance per week for every open account, for sparklines."""
-    sql = text(
-        """--sql
-        SELECT DISTINCT ON (b.account_id, date_trunc('week', b.as_of)) b.account_id, b.as_of, b.balance
-        FROM account_balance b
-        JOIN account a ON a.id = b.account_id AND NOT a.is_closed
-        WHERE b.as_of >= :since
-        ORDER BY b.account_id, date_trunc('week', b.as_of), b.as_of DESC, b.created_at DESC
-        """
-    )
-    out: dict[int, list[dict]] = {}
-    for r in await session.execute(sql, {"since": date.today() - timedelta(days=days)}):
-        out.setdefault(r.account_id, []).append({"as_of": r.as_of, "balance": float(r.balance)})
-    return out
+    """Weekly balances for every open account, for sparklines; computed like the Reports balance charts (statements
+    before a feed starts, checking and savings following their transactions, homes and vehicles from purchase)."""
+    points = week_points(days, date.today())
+    return {
+        r["id"]: [{"as_of": p, "balance": v} for p, v in zip(points, r["values"], strict=True) if v is not None]
+        for r in await account_balances(session, points)
+        if not r["is_closed"]
+    }
 
 
 @router.get("/holdings")

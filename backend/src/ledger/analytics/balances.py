@@ -36,6 +36,11 @@ def month_points(start: date, end: date, today: date) -> list[date]:
     return out
 
 
+def week_points(days: int, today: date) -> list[date]:
+    """Every seventh day going back `days` from today, oldest first."""
+    return [today - timedelta(days=7 * k) for k in range(days // 7, -1, -1)]
+
+
 def account_series(
     points: list[date],
     anchors: list[tuple[date, Decimal]],
@@ -124,10 +129,9 @@ def _iso_date(s: str | None) -> date | None:
         return None
 
 
-async def monthly_balances(session: AsyncSession, start: date, end: date, today: date | None = None) -> dict:
-    """Per-account month-end balances (liabilities negative, so they add up to net worth) with monthly totals."""
-    today = today or date.today()
-    points = month_points(start, end, today)
+async def account_balances(session: AsyncSession, points: list[date]) -> list[dict]:
+    """Each account's balance at the given dates (liabilities negative, so they add up to net worth), largest first;
+    accounts with no balance at any of them are left out."""
     accounts = {r.id: r for r in await session.execute(text(_ACCOUNTS))}
     snapshots = (await session.execute(text(_SNAPSHOTS))).all()
     # Statements fill in history before an account's feed starts; from then on the feed is the record.
@@ -188,6 +192,13 @@ async def monthly_balances(session: AsyncSession, start: date, end: date, today:
             }
         )
     rows.sort(key=lambda r: (r["liability"], -abs(next((v for v in reversed(r["values"]) if v is not None), 0))))
+    return rows
+
+
+async def monthly_balances(session: AsyncSession, start: date, end: date, today: date | None = None) -> dict:
+    """Per-account month-end balances with monthly totals for net worth and checking + savings."""
+    points = month_points(start, end, today or date.today())
+    rows = await account_balances(session, points)
 
     def total(pick) -> list[float]:
         return [round(sum(r["values"][i] or 0 for r in rows if pick(r)), 2) for i in range(len(points))]

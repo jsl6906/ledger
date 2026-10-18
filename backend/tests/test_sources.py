@@ -114,8 +114,10 @@ async def test_tiller_feed_sync(client, no_ai):
 
     bal = (await client.get("/api/balances")).json()
     assert any(a["account"] == "TS Checking" and a["balance"] == 1834.12 for a in bal["accounts"])
-    trend = (await client.get("/api/balances/trend")).json()
-    assert trend[str(acct.id)] == [{"as_of": d.isoformat(), "balance": 1834.12}]
+    trend = (await client.get("/api/balances/trend")).json()[str(acct.id)]
+    assert trend[-1] == {"as_of": TODAY.isoformat(), "balance": 1834.12}
+    # Weekly points before the snapshot work back through the day's transactions (2500 in, 4.50 out).
+    assert trend[-2] == {"as_of": (TODAY - timedelta(days=7)).isoformat(), "balance": round(1834.12 - 2495.5, 2)}
 
     # A retired feed account is skipped entirely: no account, balances or transactions.
     retired = [_tiller_row(d, "TS RETIRED", -3, "tid-retired", account="TS Old Card", number="9911")]
