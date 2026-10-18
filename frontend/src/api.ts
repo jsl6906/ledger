@@ -25,6 +25,18 @@ function qs(params?: Params): string {
   return s ? `?${s}` : ''
 }
 
+async function errorFrom(res: Response): Promise<ApiError> {
+  let detail: string | undefined
+  try {
+    const j = await res.json()
+    detail = typeof j.detail === 'string' ? j.detail : j.detail !== undefined ? JSON.stringify(j.detail) : undefined
+  } catch {
+    /* non-JSON error body */
+  }
+  // HTTP/2 responses carry no status text, so without a fallback an unexplained failure shows a blank message.
+  return new ApiError(res.status, detail || res.statusText || `Request failed (HTTP ${res.status})`)
+}
+
 export async function api<T>(method: string, path: string, body?: unknown, params?: Params): Promise<T> {
   const res = await fetch(`/api${path}${qs(params)}`, {
     method,
@@ -33,16 +45,7 @@ export async function api<T>(method: string, path: string, body?: unknown, param
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   if (res.status === 401 && !path.startsWith('/auth/')) onUnauthorized?.()
-  if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const j = await res.json()
-      detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(res.status, detail)
-  }
+  if (!res.ok) throw await errorFrom(res)
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
@@ -115,16 +118,7 @@ export async function upload<T>(path: string, file: File | null, fields: Record<
   for (const [k, v] of Object.entries(fields)) fd.append(k, v)
   const res = await fetch(`/api${path}`, { method: 'POST', body: fd, credentials: 'same-origin' })
   if (res.status === 401) onUnauthorized?.()
-  if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const j = await res.json()
-      detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(res.status, detail)
-  }
+  if (!res.ok) throw await errorFrom(res)
   return res.json() as Promise<T>
 }
 

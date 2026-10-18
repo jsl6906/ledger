@@ -26,6 +26,11 @@ foreach ($k in $azure.Keys) { $lines += "$k=$($azure[$k])" }
 $lines += "", "APP_PASSWORD_HASH=$($local['APP_PASSWORD_HASH'])", "SESSION_SECRET=$session", "COOKIE_SECURE=false"
 $lines += "GEMINI_KEY=$($local['GEMINI_KEY'])", "RENTCAST_API_KEY=$($local['RENTCAST_API_KEY'])", "", "GOOGLE_SERVICE_ACCOUNT_FILE=/secrets/google-sa.json", ""
 foreach ($k in "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_FROM", "SMTP_PASSWORD") { $lines += "$k=$($local[$k])" }
+# Inbound mail (and saving replies to emailed questions) needs all of these; see .env.example.
+foreach ($k in "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD", "IMAP_FOLDER", "IMAP_POLL_MINUTES",
+    "MAIL_ALLOWED_SENDERS", "MAIL_INBOUND_ADDRESS") {
+    if ($local.Contains($k)) { $lines += "$k=$($local[$k])" }
+}
 $lines += "APP_BASE_URL=$BaseUrl", "TZ=America/New_York"
 
 New-Item -ItemType Directory -Force "$share\secrets" | Out-Null

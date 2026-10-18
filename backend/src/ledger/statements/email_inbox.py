@@ -257,10 +257,18 @@ def _connect() -> imaplib.IMAP4_SSL:
     return conn
 
 
+def _select(conn: imaplib.IMAP4_SSL, readonly: bool = False) -> None:
+    folder = get_settings().imap_folder
+    typ, data = conn.select(_quote(folder), readonly=readonly)
+    if typ != "OK":
+        detail = (data[0] if data and data[0] else b"").decode(errors="replace")
+        raise RuntimeError(f"IMAP_FOLDER {folder!r} could not be opened ({detail}); create it or fix IMAP_FOLDER")
+
+
 def _fetch_unseen(senders: set[str]) -> list[tuple[str, bytes]]:
     conn = _connect()
     try:
-        conn.select(_quote(get_settings().imap_folder), readonly=True)
+        _select(conn, readonly=True)
         uids: set[int] = set()
         # Searching by sender keeps the app from touching anyone else's mail in a shared mailbox.
         for sender in senders:
@@ -280,7 +288,7 @@ def _fetch_unseen(senders: set[str]) -> list[tuple[str, bytes]]:
 def _mark_seen(uids: list[str]) -> None:
     conn = _connect()
     try:
-        conn.select(_quote(get_settings().imap_folder))
+        _select(conn)
         conn.uid("STORE", ",".join(uids), "+FLAGS", "(\\Seen)")
     finally:
         conn.logout()

@@ -99,6 +99,27 @@ def test_inbox_needs_allowed_senders(monkeypatch):
     assert not email_inbox.inbox_configured()
 
 
+def test_missing_imap_folder_is_reported(monkeypatch):
+    import pytest
+
+    settings = get_settings().model_copy(update={"imap_folder": "Ledger"})
+    monkeypatch.setattr(email_inbox, "get_settings", lambda: settings)
+
+    class Conn:
+        def select(self, mailbox, readonly=False):
+            return "NO", [b"[NONEXISTENT] Unknown Mailbox: Ledger (Failure)"]
+
+        def uid(self, *args):
+            raise AssertionError("searched without a selected folder")
+
+        def logout(self):
+            pass
+
+    monkeypatch.setattr(email_inbox, "_connect", Conn)
+    with pytest.raises(RuntimeError, match="IMAP_FOLDER 'Ledger' could not be opened"):
+        email_inbox._fetch_unseen({ME})
+
+
 async def test_question_reply_is_saved_on_transactions(client, monkeypatch):
     from ledger.alerts import questions
 
