@@ -11,7 +11,7 @@ from ledger.config import get_settings
 from ledger.crypto import encrypt
 from ledger.db.engine import get_session
 from ledger.jobs.worker import enqueue, notify_worker
-from ledger.models import Account, AccountBalance, Institution, Source
+from ledger.models import Account, AccountBalance, ImportBatch, ImportRow, Institution, Source
 from ledger.schemas import JobOut
 from ledger.sources import simplefin, tiller
 from ledger.sources.google import service_account_email
@@ -41,9 +41,39 @@ async def _stale_accounts(session: AsyncSession, s: Source) -> list[dict]:
     ]
 
 
+async def _review(session: AsyncSession, kind: str) -> dict | None:
+    """Feed imports still held for duplicate decisions, read live: a sync's saved result goes stale as soon as
+    its import is reviewed and committed (or rolled back) on the import screen."""
+    pending = func.count().filter(ImportRow.decision == "pending")
+    waiting = func.count().filter(ImportRow.decision.in_(("insert", "keep")))
+    rows = (
+        await session.execute(
+            select(ImportBatch.id, pending.label("pending"), waiting.label("waiting"))
+            .join(ImportRow, ImportRow.batch_id == ImportBatch.id)
+            .where(ImportBatch.origin == kind, ImportBatch.status == "review")
+            .group_by(ImportBatch.id)
+            .order_by(ImportBatch.id)
+        )
+    ).all()
+    if not rows:
+        return None
+    return {
+        "batch_id": rows[0].id,
+        "batches": len(rows),
+        "pending": sum(r.pending for r in rows),
+        "waiting": sum(r.waiting for r in rows),
+    }
+
+
 async def _out(session: AsyncSession, s: Source) -> dict:
     linked = await session.scalar(select(func.count()).select_from(Account).where(Account.external_refs.has_key(s.kind)))
     connected = bool(s.secret) if s.kind == "simplefin" else bool(s.config.get("sheet_id"))
+    review = await _review(session, s.kind)
+    status = s.last_status
+    if review:
+        status = "needs_review" if status != "failed" else status
+    elif status == "needs_review":
+        status = "ok"
     return {
         "id": s.id,
         "kind": s.kind,
@@ -53,8 +83,9 @@ async def _out(session: AsyncSession, s: Source) -> dict:
         "connected": connected,
         "linked_accounts": linked or 0,
         "stale_accounts": await _stale_accounts(session, s) if connected else [],
+        "review": review,
         "last_sync_at": s.last_sync_at,
-        "last_status": s.last_status,
+        "last_status": status,
         "last_error": s.last_error,
         "last_result": s.last_result,
     }

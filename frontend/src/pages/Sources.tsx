@@ -36,6 +36,8 @@ function when(ts: string | null) {
   return `${shortDate(ts)} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
 }
 
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+
 function StatusTag({ s }: { s?: DataSource }) {
   if (!s || !s.connected) return <span className="tag tag-outline">Not set up</span>
   if (!s.enabled) return <span className="tag tag-neutral">Paused</span>
@@ -126,6 +128,7 @@ function SourceCard({ kicker, title, source, actions, children }: {
   const stale = source?.stale_accounts ?? []
   const shownStale = showAllStale ? stale : stale.slice(0, STALE_SHOWN)
   const needsFix = stale.length > 0 || (source?.kind === 'simplefin' && warnings.length > 0)
+  const review = source?.review
   return (
     <Card style={{ gap: 'var(--space-2)' }}>
       <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -136,16 +139,20 @@ function SourceCard({ kicker, title, source, actions, children }: {
         <p className="card-body" style={{ margin: 0 }}>
           {source.config.sheet_title ? <>Sheet “{source.config.sheet_title}”. </> : null}
           {source.linked_accounts} linked account{source.linked_accounts === 1 ? '' : 's'} · last sync {when(source.last_sync_at)}
-          {source.last_status === 'ok' && r.fetched !== undefined && (
+          {source.last_status === 'ok' && r.fetched !== undefined && !r.needs_review && (
             <> · {r.fetched} rows read, {r.inserted ?? 0} added{r.skipped_duplicates ? `, ${r.skipped_duplicates} duplicates skipped` : ''}
               {r.categories_filled ? `, ${r.categories_filled} categorized` : ''}</>
           )}
         </p>
       )}
-      {source?.last_status === 'needs_review' && r.batch_id && (
+      {review && (
         <div className="callout">
-          {r.needs_review} possible duplicate{r.needs_review === 1 ? '' : 's'} need a decision before {r.new} new rows land.{' '}
-          <Link to={`/import/${r.batch_id}`}>Review import</Link>
+          {review.pending
+            ? <>{plural(review.pending, 'possible duplicate')} need{review.pending === 1 ? 's' : ''} a decision. Until then,{' '}
+              {plural(review.waiting, 'new row')} {review.waiting === 1 ? 'is' : 'are'} held back</>
+            : <>{plural(review.waiting, 'new row')} {review.waiting === 1 ? 'is' : 'are'} ready; commit the import or they land on the next sync</>}
+          {review.batches > 1 ? ` across ${review.batches} imports` : ''}.{' '}
+          <Link to={`/import/${review.batch_id}`}>{review.batches > 1 ? 'Review oldest import' : 'Review import'}</Link>
         </div>
       )}
       {source?.last_status === 'failed' && source.last_error && <div className="callout error">{source.last_error}</div>}

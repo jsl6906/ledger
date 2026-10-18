@@ -341,6 +341,30 @@ async def test_commit_rechecks_rows_against_transactions_added_while_waiting(cli
     assert copies == ["tiller"]
 
 
+async def test_sources_review_reflects_live_batches(client, no_ai):
+    from ledger.sources.service import record_run
+
+    batch_id, _, _ = await _held_feed_batch(client, "7783", "TS SPA", [("TS CAFE", "-6.10"), ("TS BOOKS", "-19.99")])
+    async with get_sessionmaker()() as s:
+        src = await s.get(Source, await _source("simplefin"))
+        await record_run(s, src, {"needs_review": 1, "batch_id": batch_id, "new": 3}, None)
+
+    async def simplefin_out():
+        return next(x for x in (await client.get("/api/sources")).json()["sources"] if x["kind"] == "simplefin")
+
+    sf = await simplefin_out()
+    assert sf["last_status"] == "needs_review" and sf["review"]["pending"] >= 1 and sf["review"]["waiting"] >= 2
+
+    # Committed on the import screen: the sync's saved result no longer holds the pane in review.
+    r = await client.post(f"/api/imports/{batch_id}/commit", json={"pending_as": "skip"})
+    assert r.status_code == 200, r.text
+    sf = await simplefin_out()
+    if sf["review"] is None:
+        assert sf["last_status"] == "ok"
+    else:  # another test's feed batch still waiting
+        assert sf["review"]["batch_id"] != batch_id and sf["last_status"] == "needs_review"
+
+
 async def test_sync_rechecks_waiting_batch_before_committing(client, no_ai):
     batch_id, _, d = await _held_feed_batch(client, "7782", "TS POOL", [("TS LENDER", "-900.00"), ("TS BAKERY", "-8.25")])
     await _tiller_adds("7782", [(d, "TS LENDER", "-900.00"), (d + timedelta(days=1), "TS BAKERY", "-8.25")])
