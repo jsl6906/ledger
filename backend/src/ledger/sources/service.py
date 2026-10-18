@@ -11,6 +11,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger.config import get_settings
 from ledger.imports.parsing import column_profile
 from ledger.imports.service import _insert_rows, _Refs, commit_batch, prepare_batch
 from ledger.models import (
@@ -26,6 +27,7 @@ from ledger.models import (
     Source,
     Transaction,
 )
+from ledger.services.dedupe import CERTAIN, adjudicate_pending, recheck_inserts
 
 log = logging.getLogger(__name__)
 
@@ -189,7 +191,8 @@ async def _known_external_ids(session: AsyncSession, kind: str, ids: list[str]) 
                     .where(
                         ImportRow.external_id.in_(chunk),
                         ImportBatch.origin == kind,
-                        ImportBatch.status.in_(OPEN_BATCH_STATUSES),
+                        # Rows a committed batch skipped as duplicates have no transaction of their own.
+                        ImportBatch.status.in_((*OPEN_BATCH_STATUSES, "committed")),
                     )
                 )
             ).all()
@@ -230,17 +233,25 @@ async def _fill_categories(session: AsyncSession, feed: Feed) -> int:
 
 
 async def auto_resolve(session: AsyncSession, batch: ImportBatch) -> int:
-    """Apply confident AI verdicts to possible duplicates; returns how many remain ambiguous."""
+    """Apply confident AI verdicts and near-certain matches to possible duplicates; returns how many remain ambiguous."""
+    # Rows set to be inserted may match transactions another sync added while this batch waited.
+    new_pairs = (await recheck_inserts(session, batch))["pending_pairs"]
+    if new_pairs and get_settings().gemini_key:
+        await adjudicate_pending(session, new_pairs)
     pairs = (
-        await session.scalars(
-            select(DuplicatePair)
+        await session.execute(
+            select(DuplicatePair, Transaction.source_type)
             .join(ImportRow, DuplicatePair.import_row_id == ImportRow.id)
-            .where(ImportRow.batch_id == batch.id, DuplicatePair.status == "pending")
+            .join(Transaction, Transaction.id == DuplicatePair.txn_a_id)
+            .where(ImportRow.batch_id == batch.id, ImportRow.decision == "pending", DuplicatePair.status == "pending")
         )
     ).all()
     ambiguous = 0
-    for p in pairs:
-        if p.ai_probability is not None and p.ai_probability >= AI_SAME:
+    for p, existing_source in pairs:
+        # Same day, account and name as a transaction from another source; a feed never lists one charge twice, so a
+        # match from this same feed may be a genuine repeat purchase and is left for a person.
+        certain = p.ai_probability is None and p.score >= Decimal(str(CERTAIN)) and existing_source != batch.origin
+        if certain or (p.ai_probability is not None and p.ai_probability >= AI_SAME):
             await session.execute(update(ImportRow).where(ImportRow.id == p.import_row_id).values(decision="skip_duplicate"))
         elif p.ai_probability is not None and p.ai_probability <= AI_DIFFERENT:
             await session.execute(update(ImportRow).where(ImportRow.id == p.import_row_id).values(decision="keep"))

@@ -6,7 +6,8 @@ import pytest
 from sqlalchemy import select
 
 from ledger.db.engine import get_sessionmaker
-from ledger.models import Account, AccountBalance, ImportBatch, Source, Transaction
+from ledger.models import Account, AccountBalance, DuplicatePair, ImportBatch, ImportRow, Source, Transaction
+from ledger.services.normalize import normalize_merchant
 from ledger.sources import simplefin, tiller
 from ledger.sources.jobs import run_sync
 from ledger.sources.service import apply_feed
@@ -176,6 +177,182 @@ async def test_feed_duplicates_against_manual_entries(client, no_ai):
     async with get_sessionmaker()() as s:
         res = await apply_feed(s, await s.get(Source, sid), feed)
     assert res["inserted"] == 1 and res["skipped_duplicates"] == 2
+
+
+async def test_feed_resolves_certain_matches_and_remembers_skips(client, no_ai, monkeypatch):
+    from ledger.ai import imports as ai_imports
+
+    acct = (
+        await client.post("/api/accounts", json={"name": "TS Amex", "account_type": "credit_card", "mask": "3005"})
+    ).json()
+    d = TODAY - timedelta(days=2)
+    async with get_sessionmaker()() as s:
+        for day, desc, merchant, amount, source in (
+            # Another feed's copy of the same charges, with its own description format.
+            (d, "TS DELI 4417 SPRINGFIELD VA", "TS DELI", "-7.25", "tiller"),
+            (d - timedelta(days=1), "TS BOOKS ONLINE", "TS BOOKS", "-12.00", "tiller"),
+            # An earlier charge from this same feed: a same-day twin may be a repeat purchase.
+            (d, "TS CAFE 22", "TS CAFE", "-3.10", "simplefin"),
+        ):
+            s.add(
+                Transaction(
+                    account_id=acct["id"],
+                    txn_date=day,
+                    amount=Decimal(amount),
+                    description=desc,
+                    merchant=normalize_merchant(merchant),
+                    source_type=source,
+                )
+            )
+        await s.commit()
+
+    sent: list[dict] = []
+
+    async def capture(pairs):
+        sent.extend(pairs)
+        return {}
+
+    monkeypatch.setattr(ai_imports, "adjudicate_pairs", capture)
+    sid = await _source("simplefin")
+    feed = tiller.build_feed(
+        [
+            _tiller_row(d, "TS DELI", -7.25, "sf-deli", account="Amex 3005", number="3005"),
+            _tiller_row(d, "TS BOOKS", -12.00, "sf-books", account="Amex 3005", number="3005"),
+            _tiller_row(d, "TS CAFE", -3.10, "sf-cafe", account="Amex 3005", number="3005"),
+        ],
+        [],
+        None,
+    )
+    async with get_sessionmaker()() as s:
+        res = await apply_feed(s, await s.get(Source, sid), feed)
+    batch_id = res["batch_id"]
+    async with get_sessionmaker()() as s:
+        rows = {r.external_id: r for r in (await s.scalars(select(ImportRow).where(ImportRow.batch_id == batch_id))).all()}
+        scores = dict(
+            (
+                await s.execute(
+                    select(ImportRow.external_id, DuplicatePair.score)
+                    .join(DuplicatePair, DuplicatePair.import_row_id == ImportRow.id)
+                    .where(ImportRow.batch_id == batch_id)
+                )
+            ).all()
+        )
+    # Near-certain cross-feed match is skipped without AI; the same-feed twin and the weaker match wait for a person.
+    assert scores["sf-deli"] >= Decimal("0.95") and scores["sf-cafe"] >= Decimal("0.95"), scores
+    assert rows["sf-deli"].decision == "skip_duplicate"
+    assert rows["sf-cafe"].decision == "pending" and rows["sf-books"].decision == "pending"
+    # Only the weaker match went to the AI, with each side's source.
+    assert [(p["a"]["source"], p["b"]["source"]) for p in sent] == [("tiller", "simplefin")]
+    assert "source: simplefin" in ai_imports._side(sent[0]["b"])
+
+    r = await client.post(
+        f"/api/imports/{batch_id}/rows/decisions",
+        json={"row_ids": [rows["sf-cafe"].id, rows["sf-books"].id], "decision": "skip_duplicate"},
+    )
+    assert r.status_code == 200, r.text
+    async with get_sessionmaker()() as s:
+        res = await apply_feed(s, await s.get(Source, sid), feed)
+    assert res["new"] == 0 and res["skipped_duplicates"] == 3
+    async with get_sessionmaker()() as s:
+        assert (await s.get(ImportBatch, batch_id)).status == "committed"
+    # Rows the committed batch skipped are remembered, not fetched and reviewed again on every sync.
+    async with get_sessionmaker()() as s:
+        res = await apply_feed(s, await s.get(Source, sid), feed)
+    assert res["new"] == 0 and "batch_id" not in res
+
+
+async def _held_feed_batch(client, mask: str, held_desc: str, rows: list[tuple[str, str]]) -> tuple[int, int, date]:
+    """A SimpleFIN batch kept in review by one ambiguous row, plus `rows` (description, amount) set to be inserted."""
+    acct = (await client.post("/api/accounts", json={"name": f"TS Savings {mask}", "mask": mask})).json()
+    d = TODAY - timedelta(days=2)
+    r = await client.post(
+        "/api/transactions",
+        json={
+            "txn_date": (d - timedelta(days=1)).isoformat(),
+            "description": held_desc,
+            "amount": "-40.00",
+            "account_id": acct["id"],
+        },
+    )
+    assert r.status_code == 201
+    feed = tiller.build_feed(
+        [
+            _tiller_row(d, held_desc, -40.00, f"sf-held-{mask}", account=f"Sav {mask}", number=mask),
+            *(
+                _tiller_row(d, desc, float(amt), f"sf-{mask}-{i}", account=f"Sav {mask}", number=mask)
+                for i, (desc, amt) in enumerate(rows)
+            ),
+        ],
+        [],
+        None,
+    )
+    async with get_sessionmaker()() as s:
+        res = await apply_feed(s, await s.get(Source, await _source("simplefin")), feed)
+    assert res["needs_review"] == 1, res
+    return res["batch_id"], acct["id"], d
+
+
+async def _tiller_adds(mask: str, rows: list[tuple[date, str, str]]) -> None:
+    """The other feed inserts the same charges while the SimpleFIN batch waits."""
+    feed = tiller.build_feed(
+        [
+            _tiller_row(day, desc, float(amt), f"t-{mask}-{i}", account=f"Sav {mask}", number=mask)
+            for i, (day, desc, amt) in enumerate(rows)
+        ],
+        [],
+        None,
+    )
+    async with get_sessionmaker()() as s:
+        res = await apply_feed(s, await s.get(Source, await _source("tiller", sheet_id="z" * 30)), feed)
+    assert res["inserted"] == len(rows), res
+
+
+async def _decisions(batch_id: int) -> dict[str, str]:
+    async with get_sessionmaker()() as s:
+        rows = (await s.scalars(select(ImportRow).where(ImportRow.batch_id == batch_id))).all()
+    return {r.description: r.decision for r in rows}
+
+
+async def test_commit_rechecks_rows_against_transactions_added_while_waiting(client, no_ai):
+    batch_id, acct_id, d = await _held_feed_batch(
+        client, "7781", "TS GYM", [("TS PENNYMAC", "-3135.86"), ("TS GROCER BEE", "-53.67")]
+    )
+    assert await _decisions(batch_id) == {"TS GYM": "pending", "TS PENNYMAC": "insert", "TS GROCER BEE": "insert"}
+    await _tiller_adds("7781", [(d, "TS PENNYMAC", "-3135.86"), (d + timedelta(days=1), "TS GROCER BEE", "-53.67")])
+
+    # The certain match is skipped; the weaker one is refused until a person decides it.
+    r = await client.post(f"/api/imports/{batch_id}/commit", json={"pending_as": "skip"})
+    assert r.status_code == 409 and "1 row now matches" in r.json()["detail"], r.text
+    assert await _decisions(batch_id) == {"TS GYM": "pending", "TS PENNYMAC": "skip_duplicate", "TS GROCER BEE": "pending"}
+    pairs = (await client.get(f"/api/imports/{batch_id}/duplicates")).json()
+    assert {p["row"]["description"] for p in pairs if p["status"] == "pending"} == {"TS GYM", "TS GROCER BEE"}
+
+    r = await client.post(f"/api/imports/{batch_id}/commit", json={"pending_as": "skip"})
+    assert r.status_code == 200, r.text
+    assert r.json()["stats"]["inserted"] == 0
+    async with get_sessionmaker()() as s:
+        copies = (
+            await s.scalars(
+                select(Transaction.source_type).where(
+                    Transaction.account_id == acct_id, Transaction.amount == Decimal("-3135.86")
+                )
+            )
+        ).all()
+    assert copies == ["tiller"]
+
+
+async def test_sync_rechecks_waiting_batch_before_committing(client, no_ai):
+    batch_id, _, d = await _held_feed_batch(client, "7782", "TS POOL", [("TS LENDER", "-900.00"), ("TS BAKERY", "-8.25")])
+    await _tiller_adds("7782", [(d, "TS LENDER", "-900.00"), (d + timedelta(days=1), "TS BAKERY", "-8.25")])
+
+    no_ai["TS BAKERY"] = 0.97
+    async with get_sessionmaker()() as s:
+        res = await apply_feed(s, await s.get(Source, await _source("simplefin")), tiller.build_feed([], [], None))
+    # The new match went to the AI and was skipped; the original ambiguous row still needs a person.
+    assert res.get("needs_review") == 1 and res["batch_id"] == batch_id, res
+    assert await _decisions(batch_id) == {"TS POOL": "pending", "TS LENDER": "skip_duplicate", "TS BAKERY": "skip_duplicate"}
+    r = await client.post(f"/api/imports/{batch_id}/commit", json={"pending_as": "skip"})
+    assert r.status_code == 200 and r.json()["stats"]["inserted"] == 0, r.text
 
 
 def test_tiller_rows_without_ids_get_stable_ids():

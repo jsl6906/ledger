@@ -15,12 +15,14 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ledger.ai.client import AIUnavailable
-from ledger.models import Account, DuplicatePair, ImportRow, Transaction
+from ledger.models import Account, DuplicatePair, ImportBatch, ImportRow, Transaction
 
 log = logging.getLogger(__name__)
 
 WINDOW_DAYS = 3
 THRESHOLD = 0.55
+# Same day, same account and closely matching names; these pairs skip AI review.
+CERTAIN = 0.95
 AI_BATCH = 40
 
 
@@ -78,7 +80,7 @@ def score_pair(dd: int, same_acct: bool | None, sim: float, exact: bool) -> tupl
 
 _IMPORT_CANDIDATES = text(
     """--sql
-    SELECT r.id AS row_id, t.id AS txn_id, abs(r.txn_date - t.txn_date) AS dd,
+    SELECT r.id AS row_id, t.id AS txn_id, t.source_type, abs(r.txn_date - t.txn_date) AS dd,
            CASE WHEN r.account_id IS NULL OR t.account_id IS NULL THEN NULL
                 ELSE r.account_id = t.account_id END AS same_acct,
            similarity(coalesce(r.merchant, ''), coalesce(t.merchant, '')) AS sim,
@@ -90,10 +92,45 @@ _IMPORT_CANDIDATES = text(
       ON t.amount = r.amount
      AND t.txn_date BETWEEN r.txn_date - CAST(:w AS integer) AND r.txn_date + CAST(:w AS integer)
      AND t.deleted_at IS NULL
-    WHERE r.batch_id = :b AND r.decision = 'pending'
+    WHERE r.batch_id = :b AND r.decision = :decision
       AND (NOT :same_account_only OR r.account_id IS NOT DISTINCT FROM t.account_id)
+      AND (CAST(:since AS timestamptz) IS NULL OR t.created_at >= CAST(:since AS timestamptz))
+      AND NOT EXISTS (SELECT 1 FROM duplicate_pair p WHERE p.import_row_id = r.id AND p.txn_a_id = t.id)
     """
 )
+
+
+async def _best_matches(
+    session: AsyncSession, batch_id: int, decision: str, window: int, same_account_only: bool, since=None
+) -> dict[int, tuple[float, int, list[str], bool, str]]:
+    """Each row's best-scoring existing transaction: row id -> (score, txn id, reasons, exact, txn source)."""
+    best: dict[int, tuple[float, int, list[str], bool, str]] = {}
+    params = {"b": batch_id, "w": window, "same_account_only": same_account_only, "decision": decision, "since": since}
+    for r in (await session.execute(_IMPORT_CANDIDATES, params)).mappings():
+        sc, reasons = score_pair(r["dd"], r["same_acct"], float(r["sim"]), bool(r["exact"]))
+        if sc >= THRESHOLD and (r["row_id"] not in best or sc > best[r["row_id"]][0]):
+            best[r["row_id"]] = (sc, r["txn_id"], reasons, bool(r["exact"]), r["source_type"])
+    return best
+
+
+async def _flag(session: AsyncSession, row_id: int, txn_id: int, sc: float, reasons: list[str], same: bool) -> int | None:
+    """Record a row/transaction pair, skipping the row when it is certainly the same; returns the new pair's id."""
+    pair_id = await session.scalar(
+        insert(DuplicatePair)
+        .values(
+            txn_a_id=txn_id,
+            import_row_id=row_id,
+            score=Decimal(str(sc)),
+            reasons=reasons,
+            status="confirmed_duplicate" if same else "pending",
+            decided_at=datetime.now(UTC) if same else None,
+        )
+        .on_conflict_do_nothing()
+        .returning(DuplicatePair.id)
+    )
+    if same:
+        await session.execute(update(ImportRow).where(ImportRow.id == row_id).values(decision="skip_duplicate"))
+    return pair_id
 
 
 async def detect_import_duplicates(
@@ -104,36 +141,42 @@ async def detect_import_duplicates(
     same_account_only: the rows' accounts are certain (synced feeds), so a match in another account is the other leg
     of a transfer, not a duplicate.
     """
-    best: dict[int, tuple[float, int, list[str], bool]] = {}
-    params = {"b": batch_id, "w": window, "same_account_only": same_account_only}
-    for r in (await session.execute(_IMPORT_CANDIDATES, params)).mappings():
-        sc, reasons = score_pair(r["dd"], r["same_acct"], float(r["sim"]), bool(r["exact"]))
-        if sc >= THRESHOLD and (r["row_id"] not in best or sc > best[r["row_id"]][0]):
-            best[r["row_id"]] = (sc, r["txn_id"], reasons, bool(r["exact"]))
-
+    best = await _best_matches(session, batch_id, "pending", window, same_account_only)
     exact = 0
-    for row_id, (sc, txn_id, reasons, is_exact) in best.items():
-        await session.execute(
-            insert(DuplicatePair)
-            .values(
-                txn_a_id=txn_id,
-                import_row_id=row_id,
-                score=Decimal(str(sc)),
-                reasons=reasons,
-                status="confirmed_duplicate" if is_exact else "pending",
-                decided_at=datetime.now(UTC) if is_exact else None,
-            )
-            .on_conflict_do_nothing()
-        )
-        if is_exact:
-            exact += 1
-            await session.execute(update(ImportRow).where(ImportRow.id == row_id).values(decision="skip_duplicate"))
+    for row_id, (sc, txn_id, reasons, is_exact, _) in best.items():
+        await _flag(session, row_id, txn_id, sc, reasons, is_exact)
+        exact += is_exact
     await session.execute(
         update(ImportRow)
         .where(ImportRow.batch_id == batch_id, ImportRow.decision == "pending", ImportRow.id.not_in(list(best) or [0]))
         .values(decision="insert")
     )
     return {"exact_duplicates": exact, "possible_duplicates": len(best) - exact}
+
+
+async def recheck_inserts(session: AsyncSession, batch: ImportBatch, window: int = WINDOW_DAYS) -> dict:
+    """Compare rows still set to be inserted with transactions added since the batch was created, e.g. by another
+    feed's sync while this batch waited for review.
+
+    Exact matches, and for synced feeds near-certain matches from another source, are skipped; any other match puts the
+    row back to undecided. Returns {"skipped": n, "pending_pairs": [pair ids needing a decision]}.
+    """
+    feed = batch.origin in ("tiller", "simplefin")
+    source = batch_source(batch)
+    best = await _best_matches(session, batch.id, "insert", window, feed, since=batch.created_at)
+    skipped, pending = 0, []
+    for row_id, (sc, txn_id, reasons, is_exact, existing_source) in best.items():
+        same = is_exact or (feed and sc >= CERTAIN and existing_source != source)
+        pair_id = await _flag(session, row_id, txn_id, sc, reasons, same)
+        if same:
+            skipped += 1
+        else:
+            await session.execute(update(ImportRow).where(ImportRow.id == row_id).values(decision="pending"))
+            if pair_id:
+                pending.append(pair_id)
+    if best:
+        await session.flush()
+    return {"skipped": skipped, "pending_pairs": pending}
 
 
 _SCAN_CANDIDATES = text(
@@ -183,12 +226,18 @@ async def scan_transactions(session: AsyncSession, since: date | str | None = No
     return {"new_candidates": found, "confirmed_separate_kept": kept or 0}
 
 
-def _txn_side(t: Transaction | ImportRow, accounts: dict[int, str]) -> dict:
+def batch_source(batch: ImportBatch) -> str:
+    """The source_type transactions committed from this batch get."""
+    return batch.origin if batch.origin in ("backfill", "tiller", "simplefin") else batch.source_type
+
+
+def _txn_side(t: Transaction | ImportRow, accounts: dict[int, str], source: str | None) -> dict:
     return {
         "date": t.txn_date.isoformat() if t.txn_date else None,
         "amount": t.amount,
         "description": t.description,
         "account": accounts.get(t.account_id) if t.account_id else None,
+        "source": source,
     }
 
 
@@ -199,13 +248,14 @@ async def adjudicate_pending(session: AsyncSession, pair_ids: list[int], progres
     pairs = (
         await session.scalars(
             select(DuplicatePair).where(
-                DuplicatePair.id.in_(pair_ids), DuplicatePair.status == "pending", DuplicatePair.score < 0.95
+                DuplicatePair.id.in_(pair_ids), DuplicatePair.status == "pending", DuplicatePair.score < CERTAIN
             )
         )
     ).all()
     if not pairs:
         return 0
     accounts = dict((await session.execute(select(Account.id, Account.name))).all())
+    batch_sources: dict[int, str] = {}
     judged = 0
     for start in range(0, len(pairs), AI_BATCH):
         chunk = pairs[start : start + AI_BATCH]
@@ -218,7 +268,15 @@ async def adjudicate_pending(session: AsyncSession, pair_ids: list[int], progres
                 else await session.get(Transaction, p.txn_b_id)
             )
             if a and b:
-                payload.append({"id": p.id, "a": _txn_side(a, accounts), "b": _txn_side(b, accounts)})
+                if isinstance(b, ImportRow):
+                    if b.batch_id not in batch_sources:
+                        batch_sources[b.batch_id] = batch_source(await session.get(ImportBatch, b.batch_id))
+                    b_source = batch_sources[b.batch_id]
+                else:
+                    b_source = b.source_type
+                payload.append(
+                    {"id": p.id, "a": _txn_side(a, accounts, a.source_type), "b": _txn_side(b, accounts, b_source)}
+                )
         try:
             verdicts = await adjudicate_pairs(payload)
         except AIUnavailable:

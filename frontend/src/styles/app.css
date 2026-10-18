@@ -257,6 +257,7 @@ fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
     position: fixed; inset: 0; z-index: 50; max-height: none; background: var(--color-bg); border: 0;
   }
   .tx-layout > .detail > .corner { display: none; }
+  .grid-main-side.detail-first > .detail { order: -1; position: static; max-height: none; }
   .tx-layout > .detail .btn-icon { font-size: 24px; }
 
   .steps { display: flex; }

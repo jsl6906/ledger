@@ -55,7 +55,7 @@ export function TransactionPage() {
       </header>
       <ErrorNote error={ctx.error} />
 
-      <div className="grid-main-side">
+      <div className="grid-main-side detail-first">
         <div className="stack-3" style={{ minWidth: 0 }}>
           <Kpis items={[
             { k: 'Compared to usual', v: vs, m: cmp ? `typical ${money(cmp.median)} · range ${money(cmp.min)}–${money(cmp.max)}` : undefined },

@@ -364,9 +364,11 @@ async def save_template(session: AsyncSession, batch: ImportBatch, name: str) ->
 # ---------- commit / rollback ----------
 async def transaction_factory(session: AsyncSession, batch: ImportBatch):
     """A function turning one of the batch's rows into a new (unsaved) Transaction with the batch defaults."""
+    from ledger.services.dedupe import batch_source
+
     d = batch.defaults
     tags = (await session.scalars(select(Tag).where(Tag.id.in_(d.get("tag_ids") or [])))).all()
-    source = batch.origin if batch.origin in ("backfill", "tiller", "simplefin") else batch.source_type
+    source = batch_source(batch)
     merchant_aliases = await alias_map(session)
 
     def make(r: ImportRow, account_id: int | None = None) -> Transaction:
@@ -404,6 +406,16 @@ async def commit_batch(session: AsyncSession, batch: ImportBatch, pending_as: st
             raise ImportError_(
                 f"This file was already imported as {', '.join(f'#{i}' for i in twins)}; roll that import back first"
             )
+    from ledger.services.dedupe import recheck_inserts
+
+    if new := (await recheck_inserts(session, batch))["pending_pairs"]:
+        # Keep the new pairs for the review screen even though this commit is refused.
+        await session.commit()
+        n = len(new)
+        raise ImportError_(
+            f"{n} row{'s' if n > 1 else ''} now match{'' if n > 1 else 'es'} transactions added since this import was "
+            "prepared; review the possible duplicates before committing"
+        )
     await session.execute(
         update(ImportRow)
         .where(ImportRow.batch_id == batch.id, ImportRow.decision == "pending")

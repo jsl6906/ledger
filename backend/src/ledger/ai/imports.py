@@ -174,11 +174,18 @@ DUP_SYSTEM = """You decide whether two bank transactions are the same real-world
 (e.g. the same charge from two feeds, a pending vs posted copy, or a re-imported statement) or two genuinely separate
 transactions (e.g. repeat purchases at the same store, recurring bills). Consider date gaps (transaction vs posted
 dates differ by 1-3 days), description variants of the same merchant, and whether the accounts differ.
+Each side names its source. A feed (tiller, simplefin) lists each transaction once, so two rows from different sources
+with the same account, amount and date are almost always one charge reported twice, even when the merchant text is
+formatted differently (e.g. "SQ *VA18 Oxon Hill MD" vs "Va Oxon Hill Md"); call them separate only when the
+descriptions show different purchases, such as different order or reference numbers.
 reason: one short sentence a person can act on."""
 
 
 def _side(d: dict) -> str:
-    return f"{d['date']} | {Decimal(str(d['amount'])):.2f} | {d['description']} | account: {d.get('account') or 'unknown'}"
+    return (
+        f"{d['date']} | {Decimal(str(d['amount'])):.2f} | {d['description']} | account: {d.get('account') or 'unknown'}"
+        f" | source: {d.get('source') or 'unknown'}"
+    )
 
 
 async def adjudicate_pairs(pairs: list[dict]) -> dict[int, PairVerdict]:
