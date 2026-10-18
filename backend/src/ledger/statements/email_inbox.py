@@ -10,6 +10,7 @@ import hashlib
 import imaplib
 import logging
 import re
+from datetime import date, timedelta
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
@@ -27,7 +28,7 @@ from ledger.db.engine import get_sessionmaker
 from ledger.imports.parsing import detect_kind
 from ledger.imports.service import ImportError_, create_batch
 from ledger.jobs.worker import notify_worker
-from ledger.models import AlertEvent, Attachment, ImportBatch, Statement, Transaction, TransactionNote
+from ledger.models import AlertEvent, Attachment, ImportBatch, InboundEmail, Statement, Transaction, TransactionNote
 from ledger.statements.service import create_statement
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,9 @@ MIN_IMAGE_BYTES = 20_000  # smaller images are logos, icons and tracking pixels
 MAX_BODY_CHARS = 100_000
 MAX_REPLY_CHARS = 4000
 MAX_PER_POLL = 25
+# How far back to look for mail sent from the mailbox itself to the inbound address (it is never unread).
+LOOKBACK_DAYS = 7
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _UNSAFE = re.compile(r"[^A-Za-z0-9 #&()_,'-]+")  # no dots: the body's filename must not look like a file type
 _REPLY_PREFIX = re.compile(r"^((re|aw|sv)\s*:\s*)+", re.IGNORECASE)
 # Where the quoted original starts in a reply (Gmail/Apple, Outlook, mobile signatures).
@@ -265,21 +269,68 @@ def _select(conn: imaplib.IMAP4_SSL, readonly: bool = False) -> None:
         raise RuntimeError(f"IMAP_FOLDER {folder!r} could not be opened ({detail}); create it or fix IMAP_FOLDER")
 
 
-def _fetch_unseen(senders: set[str]) -> list[tuple[str, bytes]]:
+def _search(conn: imaplib.IMAP4_SSL, *criteria: str) -> set[int]:
+    typ, data = conn.uid("SEARCH", *criteria)
+    return {int(u) for u in data[0].split()} if typ == "OK" and data and data[0] else set()
+
+
+def message_key(headers: bytes) -> str:
+    """Identifies an email across polls: its Message-ID, else a hash of its headers."""
+    msg = BytesParser(policy=policy.compat32).parsebytes(headers, headersonly=True)
+    mid = " ".join(str(msg.get("Message-ID", "")).split())
+    if mid and len(mid) <= 300:
+        return mid
+    return "sha256:" + hashlib.sha256(mid.encode() or headers.strip()).hexdigest()
+
+
+def _find_mail(senders: set[str]) -> list[tuple[str, str]]:
+    """(uid, message key) of mail to consider, newest first: unread mail from the senders, plus recent mail this
+    mailbox sent to the inbound address (Gmail marks mail you send yourself as read, so it is never unread)."""
+    s = get_settings()
+    own = parseaddr(s.imap_username or "")[1].lower()
+    inbound = (s.mail_inbound_address or "").strip()
     conn = _connect()
     try:
         _select(conn, readonly=True)
         uids: set[int] = set()
         # Searching by sender keeps the app from touching anyone else's mail in a shared mailbox.
         for sender in senders:
-            typ, data = conn.uid("SEARCH", "UNSEEN", "FROM", _quote(sender))
-            if typ == "OK" and data and data[0]:
-                uids.update(int(u) for u in data[0].split())
-        out = []
-        for uid in sorted(uids, reverse=True)[:MAX_PER_POLL]:
-            typ, data = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
+            uids |= _search(conn, "UNSEEN", "FROM", _quote(sender))
+        if own in senders and inbound:
+            since = date.today() - timedelta(days=LOOKBACK_DAYS)
+            uids |= _search(
+                conn,
+                "SINCE",
+                f"{since.day}-{_MONTHS[since.month - 1]}-{since.year}",
+                "FROM",
+                _quote(own),
+                "OR",
+                "TO",
+                _quote(inbound),
+                "CC",
+                _quote(inbound),
+            )
+        if not uids:
+            return []
+        typ, data = conn.uid("FETCH", ",".join(map(str, uids)), "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID DATE FROM SUBJECT)])")
+        keys = {}
+        for item in data if typ == "OK" else []:
+            if isinstance(item, tuple) and (m := re.search(rb"\bUID (\d+)", item[0])):
+                keys[int(m.group(1))] = message_key(item[1])
+        return [(str(uid), keys[uid]) for uid in sorted(keys, reverse=True)]
+    finally:
+        conn.logout()
+
+
+def _fetch(uids: list[str]) -> dict[str, bytes]:
+    conn = _connect()
+    try:
+        _select(conn, readonly=True)
+        out = {}
+        for uid in uids:
+            typ, data = conn.uid("FETCH", uid, "(BODY.PEEK[])")
             if typ == "OK" and data and isinstance(data[0], tuple):
-                out.append((str(uid), data[0][1]))
+                out[uid] = data[0][1]
         return out
     finally:
         conn.logout()
@@ -295,21 +346,44 @@ def _mark_seen(uids: list[str]) -> None:
 
 
 async def poll_inbox() -> int:
-    """File unread mail from allowed senders (and question replies) and mark it read; returns items created."""
+    """File new mail from allowed senders (and question replies) and mark it read; returns items created."""
     if not inbox_configured():
         return 0
     senders = allowed_senders()
     if replies_saved():
         async with get_sessionmaker()() as session:
             senders |= {p["email"] for p in await people(session)}
-    done, created = [], 0
-    for uid, raw in await asyncio.to_thread(_fetch_unseen, senders):
+    candidates = await asyncio.to_thread(_find_mail, senders)
+    if not candidates:
+        return 0
+    async with get_sessionmaker()() as session:
+        filed = set(
+            (
+                await session.scalars(
+                    select(InboundEmail.message_key).where(InboundEmail.message_key.in_({k for _, k in candidates}))
+                )
+            ).all()
+        )
+    # Already filed but still unread (marking it read failed last time): just mark it read.
+    done = [uid for uid, key in candidates if key in filed]
+    todo: dict[str, str] = {}
+    for uid, key in candidates:
+        if key not in filed:
+            todo.setdefault(key, uid)
+    todo = dict(list(todo.items())[:MAX_PER_POLL])
+    raws = await asyncio.to_thread(_fetch, list(todo.values())) if todo else {}
+    created = 0
+    for key, uid in todo.items():
+        if uid not in raws:
+            continue
         try:
             async with get_sessionmaker()() as session:
-                made = await file_message(session, raw)
+                made = await file_message(session, raws[uid])
+                if made is not None:
+                    session.add(InboundEmail(message_key=key, result=", ".join(made)[:1000] or None))
                 await session.commit()
         except Exception:
-            log.exception("Filing email uid %s failed; it stays unread and is retried next poll", uid)
+            log.exception("Filing email uid %s failed; it is retried next poll", uid)
             continue
         if made is None:
             continue

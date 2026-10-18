@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
@@ -6,28 +7,52 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ledger.analytics.balances import LIABILITIES
+from ledger.config import get_settings
 from ledger.crypto import encrypt
 from ledger.db.engine import get_session
 from ledger.jobs.worker import enqueue, notify_worker
-from ledger.models import Account, Source
+from ledger.models import Account, AccountBalance, Institution, Source
 from ledger.schemas import JobOut
 from ledger.sources import simplefin, tiller
 from ledger.sources.google import service_account_email
 
 router = APIRouter(tags=["sources"])
 NAMES = {"tiller": "Tiller", "simplefin": "SimpleFIN"}
+STALE_DAYS = 7
+
+
+async def _stale_accounts(session: AsyncSession, s: Source) -> list[dict]:
+    """Open linked accounts whose newest balance from this source lags its last sync by more than STALE_DAYS,
+    i.e. the bank connection upstream (in Tiller or SimpleFIN Bridge) has stopped refreshing them."""
+    reference = s.last_sync_at.astimezone(ZoneInfo(get_settings().timezone)).date() if s.last_sync_at else date.today()
+    last = func.max(AccountBalance.as_of)
+    rows = await session.execute(
+        select(Account.id, Account.name, Account.mask, Institution.name.label("institution"), last.label("last"))
+        .join(AccountBalance, (AccountBalance.account_id == Account.id) & (AccountBalance.source == s.kind))
+        .outerjoin(Institution, Institution.id == Account.institution_id)
+        .where(Account.external_refs.has_key(s.kind), Account.is_closed.is_(False))
+        .group_by(Account.id, Institution.name)
+        .having(last < reference - timedelta(days=STALE_DAYS))
+        .order_by(last.desc(), Account.name)
+    )
+    return [
+        {"account_id": r.id, "name": r.name, "mask": r.mask, "institution": r.institution, "last_refreshed": r.last}
+        for r in rows
+    ]
 
 
 async def _out(session: AsyncSession, s: Source) -> dict:
     linked = await session.scalar(select(func.count()).select_from(Account).where(Account.external_refs.has_key(s.kind)))
+    connected = bool(s.secret) if s.kind == "simplefin" else bool(s.config.get("sheet_id"))
     return {
         "id": s.id,
         "kind": s.kind,
         "name": s.name,
         "enabled": s.enabled,
         "config": s.config,
-        "connected": bool(s.secret) if s.kind == "simplefin" else bool(s.config.get("sheet_id")),
+        "connected": connected,
         "linked_accounts": linked or 0,
+        "stale_accounts": await _stale_accounts(session, s) if connected else [],
         "last_sync_at": s.last_sync_at,
         "last_status": s.last_status,
         "last_error": s.last_error,

@@ -41,6 +41,16 @@ class AiCallLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class InboundEmail(Base):
+    """An email the inbox poller has filed, so mail that is already read (e.g. sent from the mailbox itself) is filed
+    once."""
+
+    __tablename__ = "inbound_email"
+    message_key: Mapped[str] = mapped_column(String(300), primary_key=True)
+    result: Mapped[str | None] = mapped_column(Text)
+    filed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AppSetting(Base):
     __tablename__ = "app_setting"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)

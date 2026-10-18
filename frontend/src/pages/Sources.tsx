@@ -15,6 +15,20 @@ import { accountPath } from '../links'
 import { sortRows, useUrlSort } from '../urlState'
 
 const LIABILITIES = ['credit_card', 'loan', 'mortgage']
+const STALE_SHOWN = 5
+
+const PROVIDER: Record<DataSource['kind'], { url: string; label: string; fix: string }> = {
+  tiller: {
+    url: 'https://my.tiller.com/accounts',
+    label: 'Tiller accounts',
+    fix: 'Refresh these (or update their credentials) under Accounts in Tiller, then fill the sheet; the next sync picks them up.',
+  },
+  simplefin: {
+    url: 'https://beta-bridge.simplefin.org/my-account',
+    label: 'SimpleFIN accounts',
+    fix: 'Sign in to SimpleFIN Bridge and fix the flagged connection by signing in to the bank again. No new setup token is needed; the next sync picks it up.',
+  },
+}
 
 function when(ts: string | null) {
   if (!ts) return 'never'
@@ -63,6 +77,7 @@ export function Sources() {
       <Button variant="ghost" onClick={() => sync.mutate({ id: s.id, full: true })} disabled={syncing(s)}
         title={s.kind === 'tiller' ? 'Read every row in the sheet' : 'Pull the maximum 90 days'}>Full resync</Button>
       <Button variant="ghost" onClick={() => toggle.mutate(s)}>{s.enabled ? 'Pause' : 'Resume'}</Button>
+      <a className="btn btn-ghost" href={PROVIDER[s.kind].url} target="_blank" rel="noreferrer">{PROVIDER[s.kind].label} ↗</a>
     </div>
   )
 
@@ -78,12 +93,10 @@ export function Sources() {
       {job.data?.status === 'failed' && <div className="callout error">Sync failed: {job.data.error}</div>}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(300px,100%),1fr))', gap: 'var(--space-4)', alignItems: 'start' }}>
-        <SourceCard kicker="Tiller" source={byKind('tiller')} title="Google Sheet feed"
-          cost="Cost: existing annual subscription" actions={actions(byKind('tiller'))}>
+        <SourceCard kicker="Tiller" source={byKind('tiller')} title="Google Sheet feed" actions={actions(byKind('tiller'))}>
           <TillerSetup source={byKind('tiller')} serviceAccount={info.data?.google_service_account ?? null} />
         </SourceCard>
-        <SourceCard kicker="SimpleFIN" source={byKind('simplefin')} title="Direct bank connection"
-          cost="Cost: about $15/year via SimpleFIN Bridge" actions={actions(byKind('simplefin'))}>
+        <SourceCard kicker="SimpleFIN" source={byKind('simplefin')} title="Direct bank connection" actions={actions(byKind('simplefin'))}>
           <SimpleFinSetup source={byKind('simplefin')} />
         </SourceCard>
         <Card>
@@ -104,10 +117,15 @@ export function Sources() {
   )
 }
 
-function SourceCard({ kicker, title, source, cost, actions, children }: {
-  kicker: string; title: string; source?: DataSource; cost: string; actions: ReactNode; children: ReactNode
+function SourceCard({ kicker, title, source, actions, children }: {
+  kicker: string; title: string; source?: DataSource; actions: ReactNode; children: ReactNode
 }) {
+  const [showAllStale, setShowAllStale] = useState(false)
   const r = source?.last_result ?? {}
+  const warnings = r.warnings ?? []
+  const stale = source?.stale_accounts ?? []
+  const shownStale = showAllStale ? stale : stale.slice(0, STALE_SHOWN)
+  const needsFix = stale.length > 0 || (source?.kind === 'simplefin' && warnings.length > 0)
   return (
     <Card style={{ gap: 'var(--space-2)' }}>
       <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -131,10 +149,21 @@ function SourceCard({ kicker, title, source, cost, actions, children }: {
         </div>
       )}
       {source?.last_status === 'failed' && source.last_error && <div className="callout error">{source.last_error}</div>}
-      {(r.warnings ?? []).map((w) => <div key={w} className="small text-muted">⚠ {w}</div>)}
+      {warnings.map((w) => <div key={w} className="small text-muted">⚠ {w}</div>)}
+      {shownStale.map((a) => (
+        <div key={a.account_id} className="small text-muted">
+          ⚠ <Link to={accountPath(a.account_id)}>{a.name}{a.mask ? ` ···${a.mask}` : ''}</Link>
+          {a.institution ? ` (${a.institution})` : ''} hasn't refreshed since {shortDate(a.last_refreshed)}
+        </div>
+      ))}
+      {stale.length > STALE_SHOWN && (
+        <button className="btn btn-ghost small" style={{ alignSelf: 'start' }} onClick={() => setShowAllStale(!showAllStale)}>
+          {showAllStale ? 'Show fewer' : `Show ${stale.length - STALE_SHOWN} more stale account${stale.length - STALE_SHOWN === 1 ? '' : 's'}`}
+        </button>
+      )}
+      {needsFix && source && <div className="small">{PROVIDER[source.kind].fix}</div>}
       {actions}
       {children}
-      <div className="card-meta">{cost}</div>
     </Card>
   )
 }
@@ -187,7 +216,7 @@ function SimpleFinSetup({ source }: { source?: DataSource }) {
   if (!open) {
     return (
       <button className="btn btn-ghost small" style={{ alignSelf: 'start' }} onClick={() => setOpen(true)}>
-        {source?.connected ? 'Reconnect' : 'Connect'}
+        {source?.connected ? 'Replace setup token' : 'Connect'}
       </button>
     )
   }

@@ -271,10 +271,11 @@ export interface SourceResult {
   needs_review?: number; batch_id?: number; categories_filled?: number; balances?: number; holdings?: number
   warnings?: string[]
 }
+export interface StaleAccount { account_id: number; name: string; mask: string | null; institution: string | null; last_refreshed: string }
 export interface DataSource {
   id: number; kind: 'tiller' | 'simplefin'; name: string; enabled: boolean
   config: { sheet_id?: string; sheet_title?: string; lookback_days?: number; transactions_sheet?: string; balances_sheet?: string | null }
-  connected: boolean; linked_accounts: number; last_sync_at: string | null
+  connected: boolean; linked_accounts: number; stale_accounts: StaleAccount[]; last_sync_at: string | null
   last_status: 'ok' | 'failed' | 'needs_review' | null; last_error: string | null; last_result: SourceResult
 }
 export interface SourcesInfo { google_service_account: string | null; sources: DataSource[] }

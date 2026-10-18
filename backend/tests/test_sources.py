@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ledger.db.engine import get_sessionmaker
 from ledger.models import Account, AccountBalance, DuplicatePair, ImportBatch, ImportRow, Source, Transaction
@@ -476,6 +476,41 @@ async def test_simplefin_connect_and_sync(client, no_ai, monkeypatch):
     assert sf["last_status"] == "ok" and sf["linked_accounts"] >= 1
     holdings = (await client.get("/api/holdings")).json()
     assert any(h["symbol"] == "CASH" and h["account"] == "SF Savings (7070)" for h in holdings)
+
+
+async def test_stale_accounts_listed(client, no_ai):
+    from datetime import UTC, datetime
+
+    sid = await _source("tiller", sheet_id="z" * 30)
+    synced = date(2026, 3, 20)
+    balances = [
+        {
+            "Date": _us(d),
+            "Account": name,
+            "Account #": num,
+            "Institution": "ST Bank",
+            "Account ID": f"st-{name}",
+            "Balance": 10,
+        }
+        for name, num, d in (
+            ("ST Fresh", "1111", synced - timedelta(days=1)),
+            ("ST Lagging", "2222", synced - timedelta(days=20)),
+            ("ST Closed", "3333", synced - timedelta(days=40)),
+        )
+    ]
+    async with get_sessionmaker()() as s:
+        src = await s.get(Source, sid)
+        await apply_feed(s, src, tiller.build_feed([], balances, None))
+        src.last_sync_at = datetime(2026, 3, 20, 16, tzinfo=UTC)
+        await s.execute(update(Account).where(Account.name == "ST Closed").values(is_closed=True))
+        await s.commit()
+
+    listed = (await client.get("/api/sources")).json()["sources"]
+    stale = next(x for x in listed if x["kind"] == "tiller")["stale_accounts"]
+    st = [a for a in stale if a["name"].startswith("ST ")]
+    assert [(a["name"], a["mask"], a["institution"], a["last_refreshed"]) for a in st] == [
+        ("ST Lagging", "2222", "ST Bank", (synced - timedelta(days=20)).isoformat())
+    ]
 
 
 async def test_sync_failure_recorded(client, monkeypatch):

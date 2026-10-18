@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from ledger.config import get_settings
 from ledger.db.engine import get_sessionmaker
-from ledger.models import Attachment, ImportBatch, Statement
+from ledger.models import Attachment, ImportBatch, InboundEmail, Statement
 from ledger.statements import email_inbox
 
 ME = "me@example.com"
@@ -117,7 +117,97 @@ def test_missing_imap_folder_is_reported(monkeypatch):
 
     monkeypatch.setattr(email_inbox, "_connect", Conn)
     with pytest.raises(RuntimeError, match="IMAP_FOLDER 'Ledger' could not be opened"):
-        email_inbox._fetch_unseen({ME})
+        email_inbox._find_mail({ME})
+
+
+class FakeImap:
+    """Just enough of an IMAP mailbox for poll_inbox: SEARCH by UNSEEN/SINCE+FROM, FETCH and STORE \\Seen."""
+
+    def __init__(self, messages: dict[int, tuple[EmailMessage, bool]]):
+        self.messages = {uid: (m.as_bytes(), seen) for uid, (m, seen) in messages.items()}
+        self.fetched: list[int] = []
+
+    def __call__(self):
+        return self
+
+    def select(self, mailbox, readonly=False):
+        return "OK", [str(len(self.messages)).encode()]
+
+    def logout(self):
+        pass
+
+    def uid(self, command, *args):
+        if command == "SEARCH":
+            sender = args[args.index("FROM") + 1].strip('"')
+            hits = [
+                uid
+                for uid, (raw, seen) in self.messages.items()
+                if sender.encode() in raw.split(b"\n\n")[0]
+                and ("UNSEEN" not in args or not seen)
+                and ("SINCE" not in args or b"me+ledger@example.com" in raw)
+            ]
+            return "OK", [" ".join(map(str, hits)).encode()]
+        if command == "FETCH":
+            out = []
+            for uid in map(int, args[0].split(",")):
+                raw = self.messages[uid][0]
+                if "HEADER.FIELDS" in args[1]:
+                    raw = b"\r\n".join(x for x in raw.split(b"\n") if x.lower().startswith((b"message-id", b"subject")))
+                else:
+                    self.fetched.append(uid)
+                out += [(f"1 (UID {uid} BODY[] {{{len(raw)}}}".encode(), raw), b")"]
+            return "OK", out
+        if command == "STORE":
+            for uid in map(int, args[0].split(",")):
+                self.messages[uid] = (self.messages[uid][0], True)
+            return "OK", []
+        raise AssertionError(command)
+
+
+async def test_poll_files_read_mail_sent_to_the_inbound_address_once(monkeypatch):
+    settings = get_settings().model_copy(
+        update={
+            "imap_host": "imap.example.com",
+            "imap_username": ME,
+            "imap_password": "x",
+            "mail_allowed_senders": f"{ME}, spouse@example.com",
+            "mail_inbound_address": "me+ledger@example.com",
+        }
+    )
+    monkeypatch.setattr(email_inbox, "get_settings", lambda: settings)
+    monkeypatch.setattr(email_inbox, "replies_saved", lambda: False)
+    monkeypatch.setattr(email_inbox, "notify_worker", lambda: None)
+
+    forwarded = _msg(subject="Fwd: Water bill", auth=None)  # sent from this mailbox: Gmail stores it as read
+    forwarded.replace_header("To", "me+ledger@example.com")
+    forwarded["Message-ID"] = "<poll-forward@example.com>"
+    forwarded.add_attachment(b"%PDF-1.7 poll water bill", maintype="application", subtype="pdf", filename="water.pdf")
+    elsewhere = _msg(subject="Note to self", auth=None)  # read mail from me that wasn't sent to the inbound address
+    elsewhere["Message-ID"] = "<poll-elsewhere@example.com>"
+    spouse = _msg(sender="spouse@example.com", subject="Fwd: Order poll-42 confirmed")
+    spouse["Message-ID"] = "<poll-spouse@example.com>"
+    spouse.set_content("Order total $12.00 (poll test)")
+    imap = FakeImap({10: (forwarded, True), 11: (elsewhere, True), 12: (spouse, False)})
+    monkeypatch.setattr(email_inbox, "_connect", imap)
+
+    assert await email_inbox.poll_inbox() == 2
+    assert sorted(imap.fetched) == [10, 12]
+    assert all(seen for _, seen in imap.messages.values())
+    async with get_sessionmaker()() as s:
+        keys = set((await s.scalars(select(InboundEmail.message_key))).all())
+    assert {"<poll-forward@example.com>", "<poll-spouse@example.com>"} <= keys
+
+    imap.fetched.clear()
+    assert await email_inbox.poll_inbox() == 0  # the forward is still found by date but is not fetched or filed again
+    assert imap.fetched == []
+
+
+def test_message_key_without_message_id_is_stable():
+    headers = b"Subject: Hello\r\nDate: Sun, 18 Oct 2026 13:51:30 -0400\r\n\r\n"
+    assert email_inbox.message_key(b"Message-ID: <a@b>\r\n\r\n") == "<a@b>"
+    assert email_inbox.message_key(headers) == email_inbox.message_key(headers)
+    assert email_inbox.message_key(headers) != email_inbox.message_key(headers.replace(b"Hello", b"Bye"))
+    assert email_inbox.message_key(headers).startswith("sha256:")
 
 
 async def test_question_reply_is_saved_on_transactions(client, monkeypatch):
