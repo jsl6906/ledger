@@ -236,7 +236,7 @@ function Wizard({ b }: { b: BatchDetail }) {
                   </select>
                 </Field>
                 <Field label="Amount sign">
-                  <label className="radio" style={{ minHeight: 36 }}>
+                  <label className="row" style={{ minHeight: 36, cursor: 'pointer' }}>
                     <input type="checkbox" checked={options.invert_sign}
                       onChange={(e) => setOptions({ ...options, invert_sign: e.target.checked })} />
                     Charges are positive — flip signs
@@ -244,7 +244,7 @@ function Wizard({ b }: { b: BatchDetail }) {
                 </Field>
               </div>
               <div className="row">
-                <label className="radio">
+                <label className="row" style={{ cursor: 'pointer' }}>
                   <input type="checkbox" checked={savePreset} onChange={(e) => setSavePreset(e.target.checked)} />
                   Save as preset
                 </label>

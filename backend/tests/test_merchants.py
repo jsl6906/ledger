@@ -77,3 +77,67 @@ async def test_transaction_override(client, tm):
     body = {"txn_date": "2025-03-01", "description": "SQ *TM TRUCK 12", "amount": "-3.00", "merchant_name": "TM Taco Truck"}
     n = await client.post("/api/transactions", json=body)
     assert n.json()["merchant"] == "tm taco truck" and n.json()["merchant_source"] == "user"
+
+
+async def test_renormalize_carries_merchants_forward_when_keys_change(client):
+    from sqlalchemy import select, text
+
+    from ledger.db.engine import get_sessionmaker
+    from ledger.maintenance import renormalize
+    from ledger.models import CategoryRule, MerchantProfile
+
+    cat = (await client.get("/api/categories")).json()[0]
+
+    async def add(desc, d):
+        r = await client.post("/api/transactions", json={"txn_date": d, "description": desc, "amount": "-7.00"})
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    d1 = await add("RNTEST MOBILE 04/24 DEPOSIT", "2025-04-24")
+    d2 = await add("RNTEST MOBILE 05/02 DEPOSIT", "2025-05-02")
+    await add("RNFEE SERVICE", "2025-04-01")
+    f2 = await add("RNFEE SERVICE CHARGE 04/30", "2025-04-30")
+    # Another dated key for the same charge that was never merged: it should join "rnfee service" too.
+    f3 = await add("RNFEE SERVICE CHARGE 05/31", "2025-05-31")
+
+    # Recreate what older key rules produced: per-date deposit keys (one named, with a rule), and fee keys, one of
+    # which had been merged into "rnfee service".
+    old = {
+        d1: "rntest mobile 04 24 deposit",
+        d2: "rntest mobile 05 02 deposit",
+        f2: "rnfee service",
+        f3: "rnfee service charge 05 31",
+    }
+    async with get_sessionmaker()() as s:
+        for tid, key in old.items():
+            await s.execute(text('UPDATE "transaction" SET merchant = :m WHERE id = :i'), {"m": key, "i": tid})
+        s.add_all(
+            [
+                MerchantProfile(key="rntest mobile 04 24 deposit", display_name="RN Mobile Deposit"),
+                MerchantProfile(key="rnfee service", display_name="RN Fee"),
+                MerchantProfile(key="rnfee service charge 04 30", alias_of="rnfee service"),
+                CategoryRule(pattern="rntest mobile 04 24 deposit", category_id=cat["id"]),
+            ]
+        )
+        await s.commit()
+
+    async with get_sessionmaker()() as s:
+        preview = await renormalize(s, dry_run=True)
+    assert preview["merged"] >= 3 and preview["aliased"] >= 1
+    assert (await client.get(f"/api/transactions/{d1}")).json()["merchant"] == "rntest mobile 04 24 deposit"
+
+    async with get_sessionmaker()() as s:
+        await renormalize(s)
+        rule = await s.scalar(
+            select(CategoryRule.pattern).where(CategoryRule.category_id == cat["id"], CategoryRule.pattern.like("rntest%"))
+        )
+        alias = await s.scalar(select(MerchantProfile.alias_of).where(MerchantProfile.key == "rnfee service charge"))
+    for tid in (d1, d2):
+        t = (await client.get(f"/api/transactions/{tid}")).json()
+        assert (t["merchant"], t["merchant_name"]) == ("rntest mobile deposit", "RN Mobile Deposit")
+    assert rule == "rntest mobile deposit"
+    assert alias == "rnfee service"
+    assert (await client.get(f"/api/transactions/{f2}")).json()["merchant_name"] == "RN Fee"
+    assert (await client.get(f"/api/transactions/{f3}")).json()["merchant"] == "rnfee service"
+    later = await add("RNFEE SERVICE CHARGE 06/30", "2025-06-30")
+    assert (await client.get(f"/api/transactions/{later}")).json()["merchant"] == "rnfee service"

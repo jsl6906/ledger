@@ -33,7 +33,14 @@ export function Bills() {
     queryFn: () => get<Statement[]>('/statements', { status: ['processing', 'suggested', 'failed'] }),
     refetchInterval: (q) => (q.state.data?.some((s) => s.status === 'processing') ? 2000 : false),
   })
-  const selected = params.get('series') ? Number(params.get('series')) : series.data?.[0]?.id ?? null
+  const unlinked = useQuery({
+    queryKey: ['statements', 'unlinked'],
+    queryFn: () => get<Statement[]>('/statements', { status: 'approved', unlinked: true }),
+  })
+  // Unpaid bills in a series already show under their series; this catches one-off receipts that would vanish.
+  const receipts = (unlinked.data ?? []).filter((s) => s.series_id === null)
+  const pendingCount = (pending.data?.length ?? 0) + receipts.length
+  const selected = params.get('series') ? Number(params.get('series')) : null
   const send = useMutation({
     mutationFn: (f: File) => upload<Statement>('/statements', f),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['statements'] }),
@@ -52,9 +59,14 @@ export function Bills() {
           {send.isPending ? 'Uploading…' : 'Upload statement'}
         </Button>
       </header>
-      <ErrorNote error={send.error || series.error || pending.error} />
+      <ErrorNote error={send.error || series.error || pending.error || unlinked.error} />
       <div className="split-nav">
         <nav className="side-nav">
+          <button className={`nav-item${selected === null ? ' active' : ''}`}
+            style={{ border: `1px solid ${selected === null ? 'var(--color-accent-300)' : 'var(--color-divider)'}` }}
+            onClick={() => setParams({})}>
+            <span className="label">Pending</span><span className="small" style={{ opacity: 0.7 }}>{pendingCount}</span>
+          </button>
           {(series.data ?? []).map((s) => (
             <button key={s.id} className={`nav-item${s.id === selected ? ' active' : ''}`}
               style={{ border: `1px solid ${s.id === selected ? 'var(--color-accent-300)' : 'var(--color-divider)'}` }}
@@ -65,11 +77,22 @@ export function Bills() {
           {series.data?.length === 0 && <div className="small text-muted">Series appear as you approve statements.</div>}
         </nav>
         <div className="stack-3" style={{ minWidth: 0 }}>
-          {(pending.data ?? []).map((s) => (
-            <Suggestion key={`${s.id}-${s.status}-${s.suggestion.refreshed_at ?? ''}`} st={s} series={series.data ?? []} />
-          ))}
-          <UnlinkedReceipts />
-          {selected && <SeriesView id={selected} series={series.data?.find((s) => s.id === selected)} />}
+          {selected === null ? (
+            <>
+              {(pending.data ?? []).map((s) => (
+                <Suggestion key={`${s.id}-${s.status}-${s.suggestion.refreshed_at ?? ''}`} st={s} series={series.data ?? []} />
+              ))}
+              <UnlinkedReceipts rows={receipts} />
+              {pending.isSuccess && unlinked.isSuccess && pendingCount === 0 && (
+                <Card>
+                  <div className="card-title">Nothing pending</div>
+                  <div className="card-meta">Uploaded statements waiting for approval will appear here. Pick a series to see its history.</div>
+                </Card>
+              )}
+            </>
+          ) : (
+            <SeriesView id={selected} series={series.data?.find((s) => s.id === selected)} />
+          )}
         </div>
       </div>
     </section>
@@ -213,7 +236,7 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
             <div className="card-kicker">Link to payment</div>
             {candidates.length === 0 && <div className="small text-muted">No payment of a matching amount near the due date yet. Search below, or leave it to be matched when the payment syncs.</div>}
             {candidates.map((c) => (
-              <label key={c.transaction_id} className="radio" style={{ alignItems: 'flex-start' }}>
+              <label key={c.transaction_id} className="row" style={{ alignItems: 'flex-start', flexWrap: 'nowrap', cursor: 'pointer' }}>
                 <input type="checkbox" checked={links.includes(c.transaction_id)}
                   onChange={(e) => setLinks(e.target.checked ? [...links, c.transaction_id] : links.filter((x) => x !== c.transaction_id))} />
                 <span>{candidateLabel(c)}
@@ -240,14 +263,8 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
   )
 }
 
-function UnlinkedReceipts() {
-  const unlinked = useQuery({
-    queryKey: ['statements', 'unlinked'],
-    queryFn: () => get<Statement[]>('/statements', { status: 'approved', unlinked: true }),
-  })
-  // Unpaid bills in a series already show under their series; this catches one-off receipts that would vanish.
-  const rows = (unlinked.data ?? []).filter((s) => s.series_id === null)
-  if (rows.length === 0) return <ErrorNote error={unlinked.error} />
+function UnlinkedReceipts({ rows }: { rows: Statement[] }) {
+  if (rows.length === 0) return null
   return (
     <Card style={{ gap: 'var(--space-3)' }}>
       <div>

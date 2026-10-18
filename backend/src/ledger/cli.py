@@ -45,7 +45,8 @@ def main(argv: list[str] | None = None) -> None:
     m.add_argument("revision", nargs="?", default="head")
     rev = sub.add_parser("revision", help="Autogenerate a migration")
     rev.add_argument("-m", "--message", required=True)
-    sub.add_parser("renormalize", help="Recompute merchant keys and fingerprints for all transactions")
+    rn = sub.add_parser("renormalize", help="Recompute merchant keys and fingerprints for all transactions")
+    rn.add_argument("--dry-run", action="store_true", help="Report what would change without saving")
     s = sub.add_parser("serve", help="Run migrations then start the web server")
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8000)
@@ -73,13 +74,18 @@ def main(argv: list[str] | None = None) -> None:
         from ledger.db.engine import dispose_engine, get_sessionmaker
         from ledger.maintenance import renormalize
 
-        async def run() -> int:
+        async def run() -> dict:
             async with get_sessionmaker()() as session:
-                n = await renormalize(session)
+                result = await renormalize(session, dry_run=args.dry_run)
             await dispose_engine()
-            return n
+            return result
 
-        print("updated", asyncio.run(run()), "transactions")
+        r = asyncio.run(run())
+        prefix = "dry run, nothing saved: would have " if args.dry_run else ""
+        print(
+            f"{prefix}merged {r['merged']} merchants into their new keys, aliased {r['aliased']} new keys to existing "
+            f"merchants, updated {r['updated']} transactions"
+        )
     elif args.cmd == "serve":
         import uvicorn
 

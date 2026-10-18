@@ -46,14 +46,79 @@ async def cleanup_job(ctx: JobContext) -> dict:
         return await cleanup(session)
 
 
-async def renormalize(session: AsyncSession, chunk: int = 5000) -> int:
-    """Recompute merchant keys (honouring merges and manual overrides) and fingerprints."""
+async def carry_merchants_forward(session: AsyncSession) -> dict:
+    """Before re-keying, keep merchant identities across a change to the key rules.
+
+    A brand-new key that takes over part of a merchant that keeps other transactions becomes an alias of it (the one
+    sending the most, if several), so earlier merges keep holding. An old merchant whose automatic transactions then all
+    land on one key is merged into it, so its name, merges and category rule follow. Returns {"merged": n, "aliased": n}.
+    """
+    from collections import Counter, defaultdict
+
+    from sqlalchemy import func, select
+
+    from ledger.models import MerchantProfile, Transaction
+    from ledger.services.merchants import alias_map, canonical, merge
+    from ledger.services.normalize import normalize_merchant
+
+    aliases = await alias_map(session)
+    profiled = set(await session.scalars(select(MerchantProfile.key)))
+    rows = await session.execute(
+        select(Transaction.merchant, Transaction.description, func.count())
+        .where(Transaction.merchant.is_not(None), Transaction.merchant_source.is_distinct_from("user"))
+        .group_by(Transaction.merchant, Transaction.description)
+    )
+    counts: dict[str, Counter] = defaultdict(Counter)
+    for merchant, description, n in rows:
+        counts[merchant][normalize_merchant(description)] += n
+
+    senders: dict[str | None, Counter] = defaultdict(Counter)
+    for merchant, keys in counts.items():
+        for k, n in keys.items():
+            if canonical(k, aliases) != merchant:
+                senders[canonical(k, aliases)][merchant] += n
+
+    def destinations(merchant: str) -> set[str | None]:
+        return {canonical(k, aliases) for k in counts[merchant]}
+
+    # Merchants that keep some transactions, split across several keys or take in others can't simply be renamed.
+    keepers = {m for m in counts if m in senders or len(destinations(m) - {m}) > 1 or m in destinations(m)}
+
+    aliased = 0
+    for dest, by_merchant in senders.items():
+        if not dest or dest in profiled or dest in counts or dest in aliases:
+            continue
+        owners = [m for m in by_merchant if m in keepers]
+        if owners:
+            owner = max(owners, key=lambda m: (by_merchant[m], m))
+            session.add(MerchantProfile(key=dest, alias_of=owner))
+            aliases[dest] = owner
+            aliased += 1
+
+    merged = 0
+    for merchant in counts.keys() - keepers:
+        (dest,) = destinations(merchant)
+        if dest and dest != merchant:
+            await merge(session, merchant, dest)
+            merged += 1
+    await session.flush()
+    return {"merged": merged, "aliased": aliased}
+
+
+async def renormalize(session: AsyncSession, chunk: int = 5000, dry_run: bool = False) -> dict:
+    """Recompute merchant keys (honouring merges and manual overrides) and fingerprints.
+
+    Returns {"merged": n, "aliased": n, "updated": n}; with dry_run nothing is saved.
+    """
     from sqlalchemy import bindparam, select, update
 
     from ledger.models import Transaction
     from ledger.services.merchants import alias_map, canonical
     from ledger.services.normalize import fingerprint, normalize_merchant
 
+    summary = await carry_merchants_forward(session)
+    if not dry_run:
+        await session.commit()
     aliases = await alias_map(session)
     changed, last_id = 0, 0
     while True:
@@ -75,14 +140,16 @@ async def renormalize(session: AsyncSession, chunk: int = 5000) -> int:
             )
         ).all()
         if not rows:
-            return changed
+            if dry_run:
+                await session.rollback()
+            return {**summary, "updated": changed}
         updates = []
         for r in rows:
             m = r.merchant if r.merchant_source == "user" else canonical(normalize_merchant(r.description), aliases)
             fp = fingerprint(r.account_id, r.txn_date, r.amount, r.description)
             if m != r.merchant or fp != r.fingerprint:
                 updates.append({"tid": r.id, "m": m, "fp": fp})
-        if updates:
+        if updates and not dry_run:
             await session.execute(
                 update(Transaction.__table__)
                 .where(Transaction.__table__.c.id == bindparam("tid"))
@@ -90,5 +157,5 @@ async def renormalize(session: AsyncSession, chunk: int = 5000) -> int:
                 updates,
             )
             await session.commit()
-            changed += len(updates)
+        changed += len(updates)
         last_id = rows[-1].id
