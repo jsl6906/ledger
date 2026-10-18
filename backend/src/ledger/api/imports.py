@@ -135,7 +135,6 @@ def _brief(t: Transaction) -> TxnBrief:
         amount=t.amount,
         account_name=t.account.name if t.account else None,
         category_name=t.category.name if t.category else None,
-        notes=t.notes,
         source_type=t.source_type,
         created_at=t.created_at,
     )

@@ -5,13 +5,14 @@ from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import Select, and_, case, cast, func, or_, select, update
+from sqlalchemy import Select, and_, case, cast, func, literal, or_, select, update
 from sqlalchemy import String as SAString
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import aggregate_order_by, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ledger.analytics.transfers import hidden_account, internal_transfer
 from ledger.db.engine import get_session
+from ledger.db.filters import id_in
 from ledger.jobs.worker import enqueue, notify_worker
 from ledger.models import (
     Account,
@@ -95,7 +96,6 @@ def to_out(t: Transaction) -> TransactionOut:
         suggestion_reason=t.suggestion_reason,
         member_id=t.member_id,
         member_initials=t.member.initials if t.member else None,
-        notes=t.notes,
         check_number=t.check_number,
         budget_spread_months=t.budget_spread_months,
         source_type=t.source_type,
@@ -196,7 +196,6 @@ def _filtered(
             or_(
                 Transaction.description.ilike(like),
                 Transaction.original_description.ilike(like),
-                Transaction.notes.ilike(like),
                 Transaction.id.in_(select(TransactionNote.transaction_id).where(TransactionNote.body.ilike(like))),
                 cast(Transaction.amount, SAString).like(like.replace("$", "").replace(",", "")),
             )
@@ -276,6 +275,7 @@ async def export_csv(
         conds += _visible(account_id)
     by_date = select(Transaction).where(*conds).order_by(Transaction.txn_date.asc(), Transaction.id.asc())
     rows = (await session.scalars(by_date)).unique().all()
+    notes = await _joined_notes(session, [t.id for t in rows])
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(
@@ -311,7 +311,7 @@ async def export_csv(
                 o.institution_name or "",
                 o.member_initials or "",
                 ";".join(tg.name for tg in o.tags),
-                _csv_safe(o.notes or ""),
+                _csv_safe(notes.get(o.id, "")),
                 o.source_type,
                 o.created_at.date(),
             ]
@@ -326,6 +326,19 @@ def _csv_safe(value: str) -> str:
     return "'" + value if value[:1] in ("=", "+", "-", "@") else value
 
 
+async def _joined_notes(session: AsyncSession, ids: list[int]) -> dict[int, str]:
+    """Each transaction's notes, oldest first, one per line."""
+    if not ids:
+        return {}
+    order = aggregate_order_by(literal("\n"), TransactionNote.created_at, TransactionNote.id)
+    q = (
+        select(TransactionNote.transaction_id, func.string_agg(TransactionNote.body, order))
+        .where(id_in(TransactionNote.transaction_id, ids))
+        .group_by(TransactionNote.transaction_id)
+    )
+    return dict((await session.execute(q)).all())
+
+
 @router.get("/{txn_id}", response_model=TransactionOut)
 async def get_transaction(txn_id: int, session: AsyncSession = Depends(get_session)):
     return to_out(await _load(session, txn_id))
@@ -334,8 +347,10 @@ async def get_transaction(txn_id: int, session: AsyncSession = Depends(get_sessi
 @router.post("", response_model=TransactionOut, status_code=201)
 async def create_transaction(body: TransactionCreate, session: AsyncSession = Depends(get_session)):
     await _check_refs(session, body.account_id, body.category_id, body.member_id)
-    data = body.model_dump(exclude={"tag_ids", "merchant_name"})
+    data = body.model_dump(exclude={"tag_ids", "merchant_name", "notes"})
     t = Transaction(**data, source_type="manual")
+    if note := (body.notes or "").strip():
+        t.notes = [TransactionNote(body=note, source="user")]
     try:
         await merchants.set_transaction_merchant(session, t, body.merchant_name)
     except merchants.MerchantError as exc:

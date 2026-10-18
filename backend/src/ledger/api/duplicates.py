@@ -79,12 +79,6 @@ async def _merge(session: AsyncSession, p: DuplicatePair, keep_id: int, now: dat
     if keep.category_id is None and drop.category_id is not None:
         keep.category_id, keep.category_source = drop.category_id, drop.category_source
         keep.category_rule_id = drop.category_rule_id
-    if drop.notes and drop.notes not in (keep.notes or ""):
-        keep.notes = f"{keep.notes}\n{drop.notes}" if keep.notes else drop.notes
-    other = other_description(drop.description, keep.description, keep.original_description)
-    if other and other not in (keep.notes or ""):
-        line = f"Also described as: {other}"
-        keep.notes = f"{keep.notes}\n{line}" if keep.notes else line
     keep.tags = list({t.id: t for t in [*keep.tags, *drop.tags]}.values())
     await session.execute(
         update(TransactionSource)
@@ -94,6 +88,12 @@ async def _merge(session: AsyncSession, p: DuplicatePair, keep_id: int, now: dat
     await session.execute(
         update(TransactionNote).where(TransactionNote.transaction_id == drop_id).values(transaction_id=keep_id)
     )
+    other = other_description(drop.description, keep.description, keep.original_description)
+    if other:
+        line = f"Also described as: {other}"
+        known = select(TransactionNote.id).where(TransactionNote.transaction_id == keep_id, TransactionNote.body == line)
+        if await session.scalar(known) is None:
+            session.add(TransactionNote(transaction_id=keep_id, body=line, source="merge"))
     drop.deleted_at = now
     p.status = "confirmed_duplicate"
 

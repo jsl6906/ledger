@@ -433,3 +433,11 @@ def test_drive_folder_ids():
     assert archive.parse_folder_id("1AbCdEfGhIjKlMnOp") == "1AbCdEfGhIjKlMnOp"
     with pytest.raises(archive.ArchiveError):
         archive.parse_folder_id("not a folder")
+
+
+def test_drive_names_get_the_extension_their_type_implies():
+    assert archive._missing_extension("2025_05_13", "application/pdf") == ".pdf"
+    assert archive._missing_extension("scan", "image/jpeg") == ".jpg"
+    assert archive._missing_extension("Budget", archive.SHEET_MIME) == ".xlsx"
+    assert archive._missing_extension("2025_05_13.pdf", "application/pdf") == ""
+    assert archive._missing_extension("notes", "application/vnd.google-apps.document") == ""

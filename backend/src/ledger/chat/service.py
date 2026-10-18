@@ -29,6 +29,7 @@ v_transactions(id, date, posted_date, description, merchant, amount, category, c
   - category_type is 'expense' | 'income' | 'transfer' | NULL (uncategorized).
   - internal_transfer = a matched transfer between two visible accounts (both legs are flagged).
   - reportable = NOT hidden_from_reports AND NOT account_hidden AND NOT internal_transfer.
+  - notes = all of the transaction's notes (see v_transaction_notes), oldest first, one per line; NULL if none.
 v_monthly_category(month, category, category_group, category_type, hidden_from_reports, net_amount, transactions,
   reportable)
   - one row per month/category/reportable; filter reportable = true for report totals.

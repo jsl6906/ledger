@@ -1,3 +1,6 @@
+import csv
+import io
+
 import pytest
 
 from ledger.jobs.worker import JobContext
@@ -118,7 +121,10 @@ async def test_spreadsheet_import_flow(client, setup, monkeypatch):
     assert page["total"] == 3
     created = [t for t in page["items"] if t["import_batch_id"] == b["id"]]
     assert len(created) == 2
-    assert all(t["account_name"] == "Import Card" and t["notes"] == "Imported" for t in created)
+    assert all(t["account_name"] == "Import Card" for t in created)
+    for t in created:
+        notes = (await client.get(f"/api/transactions/{t['id']}/notes")).json()
+        assert [(n["body"], n["source"], n["import_batch_id"]) for n in notes] == [("Imported", "import", b["id"])]
     netflix = next(t for t in created if t["description"] == "NETFLIX.COM")
     assert netflix["category_name"] == "Books, Amusement, & Entertainment"
 
@@ -314,6 +320,8 @@ async def test_scan_and_decide_duplicate(client, setup, monkeypatch):
             json={"txn_date": f"2026-07-{day}", "description": desc, "amount": "-88.34", "account_id": acct, "notes": desc},
         )
         ids.append(r.json()["id"])
+    first = (await client.get(f"/api/transactions/{ids[0]}/notes")).json()
+    assert [(n["body"], n["source"]) for n in first] == [("TRADER JOE'S #702", "user")]
     await _run("dup_scan", {"since": "2026-07-01"})
     pairs = [p for p in (await client.get("/api/duplicates")).json() if {p["a"]["id"], p["b"]["id"]} == set(ids)]
     assert len(pairs) == 1
@@ -321,8 +329,8 @@ async def test_scan_and_decide_duplicate(client, setup, monkeypatch):
     r = await client.post(f"/api/duplicates/{p['id']}/decide", json={"decision": "duplicate", "keep_id": ids[0]})
     assert r.json()["status"] == "confirmed_duplicate"
     assert (await client.get(f"/api/transactions/{ids[1]}")).status_code == 404
-    kept = (await client.get(f"/api/transactions/{ids[0]}")).json()
-    assert "Trader Joe's" in kept["notes"]
+    kept = [n["body"] for n in (await client.get(f"/api/transactions/{ids[0]}/notes")).json()]
+    assert "TRADER JOE'S #702" in kept and "Trader Joe's" in kept
 
 
 async def test_bulk_decide_duplicate_pairs(client, setup, monkeypatch):
@@ -358,8 +366,8 @@ async def test_bulk_decide_duplicate_pairs(client, setup, monkeypatch):
     r = await client.post("/api/duplicates/decisions", json={"pair_ids": [gym_pair["id"], 999999], "decision": "keep_a"})
     assert r.json() == {"decided": 1, "skipped": 1}
     assert (await client.get(f"/api/transactions/{gym_pair['b']['id']}")).status_code == 404
-    survivor = (await client.get(f"/api/transactions/{gym_pair['a']['id']}")).json()
-    assert "Also described as" in (survivor["notes"] or "")
+    survivor = (await client.get(f"/api/transactions/{gym_pair['a']['id']}/notes")).json()
+    assert [n["source"] for n in survivor if n["body"].startswith("Also described as")] == ["merge"]
 
     # Overlapping pairs: once a merge removes a transaction, later pairs that involve it are skipped.
     park_pairs = among(park)
@@ -429,7 +437,8 @@ async def test_duplicate_rows_link_document_and_notes(client, setup, monkeypatch
     batch_items = (await client.get("/api/transactions", params={"import_batch_id": b["id"]})).json()["items"]
     assert {t["id"] for t in batch_items} >= {existing["id"]} and len(batch_items) == 2
     acme = next(t for t in batch_items if t["id"] != existing["id"])
-    assert acme["notes"] == "Ref 998877"
+    acme_notes = (await client.get(f"/api/transactions/{acme['id']}/notes")).json()
+    assert [(n["body"], n["source"], n["filename"]) for n in acme_notes] == [("Ref 998877", "import", "june.pdf")]
     assert [s["role"] for s in (await client.get(f"/api/transactions/{acme['id']}/sources")).json()] == ["created"]
 
     # Hand-written notes stack up alongside imported ones and are searchable.
@@ -441,6 +450,10 @@ async def test_duplicate_rows_link_document_and_notes(client, setup, monkeypatch
     assert len((await client.get(f"/api/transactions/{existing['id']}/notes")).json()) == 2
     found = (await client.get("/api/transactions", params={"q": "towels + TP"})).json()["items"]
     assert [t["id"] for t in found] == [existing["id"]]
+    exported = list(csv.DictReader(io.StringIO((await client.get(
+        "/api/transactions/export.csv", params={"q": "towels + TP", "include_hidden": True}
+    )).text)))
+    assert [r["notes"] for r in exported] == ["Member 1234; 2% reward\nBulk towels + TP"]
     assert (await client.delete(f"/api/transactions/{acme['id']}/notes/{note_id}")).status_code == 404
     assert (await client.delete(f"/api/transactions/{existing['id']}/notes/{note_id}")).status_code == 204
 

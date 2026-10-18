@@ -77,7 +77,7 @@ export interface Transaction {
   category_rule_id: number | null; category_rule: string | null
   suggested_category_id: number | null; suggested_category_name: string | null
   suggestion_confidence: string | null; suggestion_reason: string | null
-  member_id: number | null; member_initials: string | null; notes: string | null; check_number: string | null
+  member_id: number | null; member_initials: string | null; check_number: string | null
   budget_spread_months: number | null; source_type: string; external_id: string | null; import_batch_id: number | null
   transfer_match_id: number | null; has_statement: boolean
   tags: Tag[]; created_at: string; updated_at: string
@@ -90,7 +90,7 @@ export interface TxnSource {
   txn_date: string | null; description: string | null; amount: string | null; match_score: string | null; created_at: string
 }
 export interface TxnNote {
-  id: number; body: string; source: 'user' | 'import' | 'question' | 'reply'; import_batch_id: number | null; attachment_id: number | null
+  id: number; body: string; source: 'user' | 'import' | 'merge' | 'question' | 'reply'; import_batch_id: number | null; attachment_id: number | null
   filename: string | null; created_at: string; updated_at: string
 }
 
@@ -200,7 +200,7 @@ export interface ImportRow {
 
 export interface TxnBrief {
   id: number; txn_date: string; description: string; amount: string; account_name: string | null
-  category_name: string | null; notes: string | null; source_type: string; created_at: string
+  category_name: string | null; source_type: string; created_at: string
 }
 
 export interface ImportPair {

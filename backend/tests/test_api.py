@@ -100,7 +100,7 @@ async def test_transaction_crud_and_rule_learning(client, refs):
     assert t["tags"][0]["name"] == "Water bills"
     assert t["institution_name"] == "Chase"
 
-    r = await client.patch(f"/api/transactions/{t['id']}", json={"category_id": groceries, "notes": "weekly"})
+    r = await client.patch(f"/api/transactions/{t['id']}", json={"category_id": groceries})
     assert r.status_code == 200, r.text
     assert r.json()["category_name"] == "Groceries"
     assert r.json()["category_source"] == "user"

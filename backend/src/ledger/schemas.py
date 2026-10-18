@@ -131,7 +131,6 @@ class TransactionBase(BaseModel):
     account_id: int | None = None
     category_id: int | None = None
     member_id: int | None = None
-    notes: str | None = None
     check_number: str | None = None
     budget_spread_months: int | None = Field(default=None, ge=1, le=60)
 
@@ -139,6 +138,8 @@ class TransactionBase(BaseModel):
 class TransactionCreate(TransactionBase):
     tag_ids: list[int] = []
     merchant_name: str | None = Field(default=None, max_length=200)
+    # Saved as the transaction's first note.
+    notes: str | None = Field(default=None, max_length=5000)
 
 
 class TransactionUpdate(BaseModel):
@@ -149,7 +150,6 @@ class TransactionUpdate(BaseModel):
     account_id: int | None = None
     category_id: int | None = None
     member_id: int | None = None
-    notes: str | None = None
     check_number: str | None = None
     budget_spread_months: int | None = Field(default=None, ge=1, le=60)
     tag_ids: list[int] | None = None
@@ -371,7 +371,6 @@ class TxnBrief(BaseModel):
     amount: Decimal
     account_name: str | None
     category_name: str | None
-    notes: str | None
     source_type: str
     created_at: datetime
 

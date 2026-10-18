@@ -14,7 +14,7 @@ async def main() -> None:
     async with get_sessionmaker()() as s:
         rows = (await s.execute(text("""--sql
             SELECT t.id, t.txn_date, t.amount, t.account_id, a.name acct, t.description, t.merchant,
-                   mp.display_name mname, c.name cat, g.name grp, t.category_source, t.notes,
+                   mp.display_name mname, c.name cat, g.name grp, t.category_source,
                    t.transfer_match_id,
                    (SELECT string_agg(n.body, ' || ') FROM transaction_note n WHERE n.transaction_id = t.id) tnotes
             FROM "transaction" t
@@ -31,7 +31,7 @@ async def main() -> None:
             print(
                 f"{r.id:>7} {r.txn_date} {r.amount:>10} a{r.account_id}:{(r.acct or '')[:18]:<18} "
                 f"{r.grp or '-'} > {r.cat or '-'} [{r.category_source}] tm={r.transfer_match_id} "
-                f"| {r.description[:60]} | m={r.merchant} ({r.mname}) | notes={r.notes} | tn={r.tnotes}"
+                f"| {r.description[:60]} | m={r.merchant} ({r.mname}) | notes={r.tnotes}"
             )
         print(f"\n{len(rows)} rows")
         await s.rollback()

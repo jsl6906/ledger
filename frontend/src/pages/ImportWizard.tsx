@@ -73,7 +73,7 @@ function Wizard({ b }: { b: BatchDetail }) {
   const [defaults, setDefaults] = useState<ImportDefaults>({
     account_id: b.defaults.account_id ?? null, account_map: b.defaults.account_map ?? {},
     category_id: b.defaults.category_id ?? null,
-    member_id: b.defaults.member_id ?? null, notes: b.defaults.notes ?? `Imported from ${b.filename}`,
+    member_id: b.defaults.member_id ?? null, notes: b.defaults.notes ?? null,
     tag_ids: b.defaults.tag_ids ?? [],
   })
   const [savePreset, setSavePreset] = useState(b.source_type === 'spreadsheet' && !b.template_name)
@@ -335,8 +335,9 @@ function Wizard({ b }: { b: BatchDetail }) {
                 {(members.data ?? []).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
               </select>
             </Field>
-            <Field label="Notes">
-              <input className="input" value={defaults.notes ?? ''} onChange={(e) => setDefaults({ ...defaults, notes: e.target.value || null })} />
+            <Field label="Note">
+              <input className="input" placeholder="Optional; added to new rows without their own note" value={defaults.notes ?? ''}
+                onChange={(e) => setDefaults({ ...defaults, notes: e.target.value || null })} />
             </Field>
             <Field label="Tags">
               <TagPicker value={defaults.tag_ids} onChange={(ids) => setDefaults({ ...defaults, tag_ids: ids })} />

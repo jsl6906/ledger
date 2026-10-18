@@ -61,7 +61,6 @@ class Transaction(TimestampMixin, Base):
     suggestion_confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
     suggestion_reason: Mapped[str | None] = mapped_column(Text)
     member_id: Mapped[int | None] = mapped_column(ForeignKey("household_member.id", ondelete="SET NULL"))
-    notes: Mapped[str | None] = mapped_column(Text)
     check_number: Mapped[str | None] = mapped_column(String(30))
     source_type: Mapped[str] = mapped_column(String(20), default="manual", server_default="manual")
     external_id: Mapped[str | None] = mapped_column(String(200), index=True)
@@ -85,6 +84,8 @@ class Transaction(TimestampMixin, Base):
     merchant_profile: Mapped[MerchantProfile | None] = relationship(
         primaryjoin="foreign(Transaction.merchant) == MerchantProfile.key", viewonly=True, lazy="joined"
     )
+    # Write-only convenience for attaching notes to new transactions; read notes through TransactionNote queries.
+    notes: Mapped[list["TransactionNote"]] = relationship(lazy="raise", passive_deletes=True)
 
 
 SOURCE_ROLES = ("created", "matched")

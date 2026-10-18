@@ -975,8 +975,6 @@ async def carry_over(session: AsyncSession, batch: ImportBatch, keep_id: int, dr
     if drop.category_id is not None and keep.category_source != "user":
         keep.category_id, keep.category_source = drop.category_id, drop.category_source
         keep.category_rule_id = drop.category_rule_id
-    if drop.notes and drop.notes not in (keep.notes or ""):
-        keep.notes = f"{keep.notes}\n{drop.notes}" if keep.notes else drop.notes
     keep.tags = list({t.id: t for t in [*keep.tags, *drop.tags]}.values())
     keep.fingerprint = fingerprint(keep.account_id, keep.txn_date, keep.amount, keep.description)
     on_keep = select(TransactionSource.import_row_id).where(

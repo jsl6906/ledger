@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 
 from ledger.config import get_settings
-from ledger.imports.parsing import detect_kind
+from ledger.imports.parsing import DOCUMENT_MIME, detect_kind
 from ledger.sources.google import GoogleNotConfigured, auth_headers, service_account_email
 
 DRIVE = "https://www.googleapis.com/drive/v3/files"
@@ -39,6 +39,16 @@ class ArchiveFile:
 
 
 # ---- Google Drive ----
+# Drive keeps a file's type apart from its name, so a PDF uploaded as "2025_05_13" is still a PDF.
+EXTENSION_FOR_MIME = {SHEET_MIME: ".xlsx", **{mime: ext for ext, mime in reversed(DOCUMENT_MIME.items())}}
+
+
+def _missing_extension(name: str, mime_type: str | None) -> str:
+    if mime_type == SHEET_MIME or detect_kind(name) is None:
+        return EXTENSION_FOR_MIME.get(mime_type or "", "")
+    return ""
+
+
 def parse_folder_id(value: str) -> str:
     value = value.strip()
     m = re.search(r"/folders/([A-Za-z0-9_-]+)", value) or re.search(r"[?&]id=([A-Za-z0-9_-]+)", value)
@@ -93,7 +103,7 @@ async def drive_list(folder_id: str, root: str = "") -> list[ArchiveFile]:
                     if f["mimeType"] == FOLDER_MIME:
                         queue.append((f["id"], f"{path}/{f['name']}".lstrip("/")))
                         continue
-                    name = f["name"] + (".xlsx" if f["mimeType"] == SHEET_MIME else "")
+                    name = f["name"] + _missing_extension(f["name"], f["mimeType"])
                     out.append(
                         ArchiveFile(
                             external_id=f["id"],

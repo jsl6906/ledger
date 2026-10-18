@@ -23,7 +23,6 @@ type Draft = {
   account_id: number | null
   category_id: number | null
   member_id: number | null
-  notes: string
   check_number: string
   budget_spread_months: number | null
   tag_ids: number[]
@@ -38,7 +37,6 @@ function toDraft(t: Transaction | null, defaults: Partial<Draft>): Draft {
     account_id: t?.account_id ?? defaults.account_id ?? null,
     category_id: t?.category_id ?? null,
     member_id: t?.member_id ?? null,
-    notes: t?.notes ?? '',
     check_number: t?.check_number ?? '',
     budget_spread_months: t?.budget_spread_months ?? null,
     tag_ids: t?.tags.map((x) => x.id) ?? [],
@@ -162,6 +160,13 @@ export function RulePrompt({ txn, categoryId, onDone, onClose }: {
   )
 }
 
+const NOTE_ORIGINS: Record<string, string> = {
+  merge: 'From a duplicate merge',
+  question: 'Emailed question',
+  reply: 'Email reply',
+  user: 'Added by you',
+}
+
 function NotesSection({ txnId }: { txnId: number }) {
   const qc = useQueryClient()
   const key = ['transactions', 'notes', txnId]
@@ -183,7 +188,7 @@ function NotesSection({ txnId }: { txnId: number }) {
   })
   return (
     <div className="section-rule">
-      <div className="card-kicker">More notes</div>
+      <div className="card-kicker">Notes</div>
       {(notes.data ?? []).map((n) => (
         <div key={n.id} style={{ borderLeft: '2px solid var(--color-divider)', paddingLeft: 8 }}>
           {editing?.id === n.id ? (
@@ -199,7 +204,7 @@ function NotesSection({ txnId }: { txnId: number }) {
             <>
               <div style={{ fontSize: 13, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{n.body}</div>
               <div className="row small muted-2" style={{ gap: 8 }}>
-                <span>{n.source === 'import' ? `From ${n.filename ?? 'an import'}` : n.source === 'question' ? 'Emailed question' : n.source === 'reply' ? 'Email reply' : 'Added by you'} · {shortDate(n.created_at)}</span>
+                <span>{n.source === 'import' ? `From ${n.filename ?? 'an import'}` : NOTE_ORIGINS[n.source] ?? 'Added by you'} · {shortDate(n.created_at)}</span>
                 <button type="button" className="link-btn" onClick={() => setEditing({ id: n.id, body: n.body })}>Edit</button>
                 <button type="button" className="link-btn" disabled={remove.isPending}
                   onClick={() => confirm('Delete this note?') && remove.mutate(n.id)}>Delete</button>
@@ -222,6 +227,7 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
   const accounts = useAccounts()
   const members = useMembers()
   const [draft, setDraft] = useState<Draft>(() => toDraft(txn, { account_id: defaultAccountId ?? null }))
+  const [firstNote, setFirstNote] = useState('')
   const [rulePrompt, setRulePrompt] = usePrompt(txn?.id)
   const [asking, setAsking] = useState(false)
   const [asked, setAsked] = useState<string | null>(null)
@@ -259,15 +265,14 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
     mutationFn: (d: Draft) => {
       const body: Record<string, unknown> = {
         ...d,
-        notes: d.notes || null,
         check_number: d.check_number || null,
         merchant_name: d.merchant_name.trim() || null,
         amount: Number(d.amount).toFixed(2),
       }
-      if (isNew) return post<Transaction>('/transactions', body)
+      if (isNew) return post<Transaction>('/transactions', { ...body, notes: firstNote.trim() || null })
       const orig = toDraft(txn, {})
       const origBody: Record<string, unknown> = {
-        ...orig, notes: orig.notes || null, check_number: orig.check_number || null, merchant_name: orig.merchant_name || null,
+        ...orig, check_number: orig.check_number || null, merchant_name: orig.merchant_name || null,
         amount: Number(orig.amount).toFixed(2),
       }
       const changed = Object.fromEntries(
@@ -410,11 +415,11 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
           <input className="input" value={draft.check_number} onChange={(e) => set('check_number', e.target.value)} />
         </Field>
       </div>
-      <Field label="Notes">
-        <textarea className="input" style={{ minHeight: 56 }} value={draft.notes} onChange={(e) => set('notes', e.target.value)} />
-      </Field>
-
-      {!isNew && <NotesSection txnId={txn.id} />}
+      {isNew ? (
+        <Field label="Note">
+          <textarea className="input" style={{ minHeight: 56 }} value={firstNote} onChange={(e) => setFirstNote(e.target.value)} />
+        </Field>
+      ) : <NotesSection txnId={txn.id} />}
 
       <div className="section-rule">
         <div className="card-kicker">Tags</div>

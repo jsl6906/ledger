@@ -383,7 +383,6 @@ async def transaction_factory(session: AsyncSession, batch: ImportBatch):
             category_id=r.category_id,
             category_source="import" if r.category_id else None,
             member_id=d.get("member_id"),
-            notes=r.notes,
             check_number=r.check_number,
             source_type=source,
             external_id=r.external_id,
@@ -391,6 +390,12 @@ async def transaction_factory(session: AsyncSession, batch: ImportBatch):
             import_batch_id=batch.id,
         )
         t.tags = list(tags)
+        if note := (r.notes or "").strip():
+            t.notes = [
+                TransactionNote(
+                    body=note, source="import", import_batch_id=batch.id, attachment_id=batch.attachment_id
+                )
+            ]
         return t
 
     return make
@@ -547,11 +552,8 @@ async def _add_import_notes(session: AsyncSession, batch: ImportBatch, notes: li
         )
     ).all():
         seen[tid].add(body.strip())
-    main_notes = dict(
-        (await session.execute(select(Transaction.id, Transaction.notes).where(id_in(Transaction.id, ids)))).all()
-    )
     for tid, body in notes:
-        if body in seen[tid] or body in (main_notes.get(tid) or ""):
+        if body in seen[tid]:
             continue
         seen[tid].add(body)
         session.add(
@@ -795,7 +797,6 @@ async def extract_into_batch(session: AsyncSession, batch: ImportBatch, result=N
     batch.defaults = {
         "account_id": account_id,
         "account_map": account_map,
-        "notes": f"Imported from {att.filename}",
     }
     batch.status = "mapping"
     return {"rows": len(rows), "document_type": result.document_type}
