@@ -501,7 +501,7 @@ export interface LinkCandidate {
 export interface StatementSuggestion {
   series_id?: number | null; series_reason?: string; new_series_name?: string | null; one_off?: boolean
   new_series_category_id?: number | null; service_type?: string | null; candidates?: LinkCandidate[]
-  transaction_ids?: number[]; preset_transaction_ids?: number[]
+  transaction_ids?: number[]; preset_transaction_ids?: number[]; refreshed_at?: string
 }
 export interface Statement {
   id: number; attachment_id: number; filename: string; series_id: number | null; series_name: string | null

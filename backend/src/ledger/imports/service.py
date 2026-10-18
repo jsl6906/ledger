@@ -486,6 +486,11 @@ async def commit_batch(session: AsyncSession, batch: ImportBatch, pending_as: st
         from ledger.imports.coverage import auto_fix
 
         new_ids += (await auto_fix(session, batch))["new_ids"]
+    if new_ids:
+        from ledger.statements.service import relink_after_insert
+
+        # Receipts filed before their payment arrived get matched now.
+        await relink_after_insert(session, new_ids)
     uncategorized = (
         (
             await session.scalars(

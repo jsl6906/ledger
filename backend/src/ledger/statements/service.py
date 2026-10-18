@@ -1,13 +1,20 @@
-"""Bills & statements: upload -> Gemini extraction -> suggested series/transaction links -> user approval."""
+"""Bills & statements: upload -> Gemini extraction -> suggested series/transaction links -> user approval.
+
+Payments often reach the ledger days after their receipt is filed, so statements still waiting on one are re-matched
+(without re-reading the document) whenever new transactions are committed.
+"""
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import delete, func, select, text
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger.db.filters import id_in
 from ledger.imports.parsing import detect_kind, parse_date
 from ledger.imports.service import ImportError_, store_attachment
 from ledger.models import (
@@ -24,6 +31,9 @@ from ledger.models import (
 
 log = logging.getLogger(__name__)
 
+AUTO_LINK_SCORE = 0.6
+CHOSEN = "Chosen by you"
+
 
 async def create_statement(
     session: AsyncSession, data: bytes, filename: str, content_type: str | None, transaction_ids: list[int] | None = None
@@ -38,6 +48,20 @@ async def create_statement(
     if len(data) > get_settings().max_upload_mb * 1024 * 1024:
         raise ImportError_(f"File is larger than {get_settings().max_upload_mb} MB")
     att = await store_attachment(session, data, filename, content_type, source="statement")
+    existing = await session.scalar(
+        select(Statement)
+        .where(Statement.attachment_id == att.id, Statement.status != "dismissed")
+        .order_by(Statement.id.desc())
+        .limit(1)
+    )
+    if existing:
+        # The same file again (e.g. attached from a transaction after it was uploaded on its own): link, don't re-read.
+        if existing.status == "failed":
+            existing.status, existing.error = "processing", None
+            existing.job_id = (await enqueue(session, "extract_bill", {"statement_id": existing.id})).id
+        if transaction_ids:
+            await add_links(session, existing, transaction_ids)
+        return existing
     st = Statement(attachment_id=att.id, suggestion={"preset_transaction_ids": transaction_ids or []})
     session.add(st)
     await session.flush()
@@ -66,7 +90,10 @@ _CANDIDATES = text(
     SELECT t.id, t.txn_date, t.amount, t.description,
            similarity(coalesce(t.merchant, ''), lower(CAST(:vendor AS text))) AS sim,
            abs(t.amount + CAST(:amt AS numeric)) AS diff,
-           EXISTS (SELECT 1 FROM statement_transaction x WHERE x.transaction_id = t.id) AS already_linked,
+           EXISTS (
+               SELECT 1 FROM statement_transaction x
+               WHERE x.transaction_id = t.id AND x.statement_id IS DISTINCT FROM CAST(:sid AS bigint)
+           ) AS already_linked,
            EXISTS (
                SELECT 1 FROM statement_transaction x
                JOIN statement s ON s.id = x.statement_id
@@ -85,14 +112,20 @@ _CANDIDATES = text(
 )
 
 
+def link_window(st: Statement) -> tuple[date, date]:
+    """Dates a statement's payment may fall on: shortly before the document through a few weeks past its due date."""
+    # created_at is a server default: unloaded (not lazily fetched) on a just-flushed row, which is created today anyway.
+    created = sa_inspect(st).dict.get("created_at")
+    anchor = st.statement_date or st.period_end or st.due_date or (created.date() if created else date.today())
+    return anchor - timedelta(days=10), (st.due_date or anchor + timedelta(days=30)) + timedelta(days=20)
+
+
 async def link_candidates(session: AsyncSession, st: Statement, series_id: int | None) -> list[dict]:
-    anchor = st.statement_date or st.period_end or st.due_date or date.today()
-    lo = anchor - timedelta(days=10)
-    hi = (st.due_date or anchor + timedelta(days=30)) + timedelta(days=20)
+    lo, hi = link_window(st)
     rows = (
         await session.execute(
             _CANDIDATES,
-            {"vendor": st.vendor or "", "amt": st.amount_due, "series": series_id, "lo": lo, "hi": hi},
+            {"vendor": st.vendor or "", "amt": st.amount_due, "series": series_id, "sid": st.id, "lo": lo, "hi": hi},
         )
     ).mappings()
     out = []
@@ -132,6 +165,28 @@ def money(v) -> str:
     return f"${Decimal(v):,.2f}"
 
 
+async def _pin(session: AsyncSession, candidates: list[dict], ids: Sequence[int], reason: str) -> list[dict]:
+    """Put chosen transactions at the top of the candidates, adding any the matcher didn't find."""
+    for tid in reversed(list(ids)):
+        if (i := next((n for n, c in enumerate(candidates) if c["transaction_id"] == tid), None)) is not None:
+            candidates.insert(0, candidates.pop(i))
+            continue
+        t = await session.get(Transaction, tid)
+        if t and t.deleted_at is None:
+            candidates.insert(
+                0,
+                {
+                    "transaction_id": tid,
+                    "date": t.txn_date.isoformat(),
+                    "amount": str(t.amount),
+                    "description": t.description,
+                    "score": 1.0,
+                    "reason": reason,
+                },
+            )
+    return candidates
+
+
 async def _category_for(session: AsyncSession, service: str | None) -> int | None:
     if not service:
         return None
@@ -157,20 +212,7 @@ async def extract_into_statement(session: AsyncSession, st: Statement) -> dict:
     series_id, series_reason = await _match_series(session, r.vendor, r.service_type)
     candidates = await link_candidates(session, st, series_id)
     presets = [i for i in st.suggestion.get("preset_transaction_ids", []) if i]
-    for tid in presets:
-        t = await session.get(Transaction, tid)
-        if t and not any(c["transaction_id"] == tid for c in candidates):
-            candidates.insert(
-                0,
-                {
-                    "transaction_id": tid,
-                    "date": t.txn_date.isoformat(),
-                    "amount": str(t.amount),
-                    "description": t.description,
-                    "score": 1.0,
-                    "reason": "Chosen when uploading",
-                },
-            )
+    candidates = await _pin(session, candidates, presets, CHOSEN)
     st.suggestion = {
         **st.suggestion,
         "series_id": series_id,
@@ -182,10 +224,136 @@ async def extract_into_statement(session: AsyncSession, st: Statement) -> dict:
         "service_type": r.service_type,
         "candidates": candidates,
         "transaction_ids": presets
-        or ([candidates[0]["transaction_id"]] if candidates and candidates[0]["score"] >= 0.6 else []),
+        or ([candidates[0]["transaction_id"]] if candidates and candidates[0]["score"] >= AUTO_LINK_SCORE else []),
+        "refreshed_at": datetime.now(UTC).isoformat(),
     }
     st.status, st.error = "suggested", None
     return {"candidates": len(candidates), "series_id": series_id}
+
+
+async def refresh_links(session: AsyncSession, st: Statement) -> bool:
+    """Re-match a suggested or approved statement against the ledger as it is now, without re-reading the document.
+
+    A suggested statement with no payment chosen yet gets the best match pre-selected for approval; approved ones only
+    get fresh candidates (linking them stays the user's call). True when the statement now has candidates.
+    """
+    sug = dict(st.suggestion or {})
+    presets = [i for i in sug.get("preset_transaction_ids", []) if i]
+    candidates = await link_candidates(session, st, st.series_id if st.status == "approved" else sug.get("series_id"))
+    candidates = await _pin(session, candidates, presets, CHOSEN)
+    found = {c["transaction_id"] for c in candidates}
+    chosen = [i for i in sug.get("transaction_ids", []) if i in found]
+    if st.status == "suggested" and not chosen and candidates and candidates[0]["score"] >= AUTO_LINK_SCORE:
+        chosen = [candidates[0]["transaction_id"]]
+    st.suggestion = {
+        **sug,
+        "candidates": candidates,
+        "transaction_ids": chosen,
+        "refreshed_at": datetime.now(UTC).isoformat(),
+    }
+    return bool(candidates)
+
+
+async def relink_unmatched(session: AsyncSession, start: date | None = None, end: date | None = None) -> int:
+    """Refresh matches for statements still waiting on a payment whose link window overlaps [start, end].
+
+    Covers suggested statements with nothing chosen and approved ones with no linked transaction. Returns how many
+    now have candidates.
+    """
+    linked = select(statement_transaction.c.statement_id)
+    rows = (
+        (
+            await session.scalars(
+                select(Statement).where(Statement.status.in_(("suggested", "approved")), Statement.id.not_in(linked))
+            )
+        )
+        .unique()
+        .all()
+    )
+    matched = 0
+    for st in rows:
+        if st.status == "suggested" and (st.suggestion or {}).get("transaction_ids"):
+            continue
+        lo, hi = link_window(st)
+        if (end and lo > end) or (start and hi < start):
+            continue
+        matched += await refresh_links(session, st)
+    return matched
+
+
+async def relink_after_insert(session: AsyncSession, txn_ids: Sequence[int]) -> int:
+    """Called once new transactions are in the session; a failure here never blocks the caller's commit."""
+    if not txn_ids:
+        return 0
+    lo, hi = (
+        await session.execute(
+            select(func.min(Transaction.txn_date), func.max(Transaction.txn_date)).where(id_in(Transaction.id, txn_ids))
+        )
+    ).one()
+    if lo is None:
+        return 0
+    try:
+        async with session.begin_nested():
+            return await relink_unmatched(session, lo, hi)
+    except Exception:
+        log.exception("Re-matching statements after new transactions failed")
+        return 0
+
+
+async def _existing_ids(session: AsyncSession, ids: list[int]) -> None:
+    if not ids:
+        return
+    found = (
+        await session.scalars(select(Transaction.id).where(Transaction.id.in_(ids), Transaction.deleted_at.is_(None)))
+    ).all()
+    if len(found) != len(ids):
+        raise ImportError_("Unknown transaction id")
+
+
+async def _apply_series(session: AsyncSession, ids: list[int], series: StatementSeries) -> None:
+    """Tag a series' payments and give uncategorized ones the series' category."""
+    await session.execute(
+        insert(transaction_tag)
+        .values([{"transaction_id": i, "tag_id": series.tag_id} for i in ids])
+        .on_conflict_do_nothing()
+    )
+    if series.category_id:
+        await session.execute(
+            Transaction.__table__.update()
+            .where(Transaction.id.in_(ids), Transaction.category_id.is_(None))
+            .values(category_id=series.category_id, category_source="statement")
+        )
+
+
+async def add_links(session: AsyncSession, st: Statement, transaction_ids: Sequence[int]) -> Statement:
+    """Link more transactions to a statement. Approved statements are linked right away; ones awaiting approval get
+    the transactions pre-selected (replacing an automatic guess) so approving links them."""
+    ids = list(dict.fromkeys(transaction_ids))
+    await _existing_ids(session, ids)
+    if not ids:
+        return st
+    if st.status == "approved":
+        await session.execute(
+            insert(statement_transaction)
+            .values([{"statement_id": st.id, "transaction_id": i} for i in ids])
+            .on_conflict_do_nothing()
+        )
+        series = await session.get(StatementSeries, st.series_id) if st.series_id else None
+        if series and series.tag_id:
+            await _apply_series(session, ids, series)
+        return st
+    if st.status not in ("processing", "suggested"):
+        raise ImportError_(f"Statement is {st.status}")
+    sug = dict(st.suggestion or {})
+    presets = [i for i in sug.get("preset_transaction_ids", []) if i]
+    sug["preset_transaction_ids"] = list(dict.fromkeys([*presets, *ids]))
+    if st.status == "suggested":
+        kept = [i for i in sug.get("transaction_ids", []) if i in presets]
+        sug["transaction_ids"] = list(dict.fromkeys([*kept, *ids]))
+        sug["candidates"] = await _pin(session, list(sug.get("candidates", [])), ids, CHOSEN)
+        sug["refreshed_at"] = datetime.now(UTC).isoformat()
+    st.suggestion = sug
+    return st
 
 
 async def _series_tag(session: AsyncSession, name: str) -> int:
@@ -241,29 +409,14 @@ async def approve_statement(session: AsyncSession, st: Statement, body) -> State
     st.series_id = series.id if series else None
 
     ids = list(dict.fromkeys(body.transaction_ids))
-    if ids:
-        found = (
-            await session.scalars(select(Transaction.id).where(Transaction.id.in_(ids), Transaction.deleted_at.is_(None)))
-        ).all()
-        if len(found) != len(ids):
-            raise ImportError_("Unknown transaction id")
+    await _existing_ids(session, ids)
     await session.execute(delete(statement_transaction).where(statement_transaction.c.statement_id == st.id))
     if ids:
         await session.execute(
             insert(statement_transaction).values([{"statement_id": st.id, "transaction_id": i} for i in ids])
         )
     if ids and series:
-        await session.execute(
-            insert(transaction_tag)
-            .values([{"transaction_id": i, "tag_id": series.tag_id} for i in ids])
-            .on_conflict_do_nothing()
-        )
-        if series.category_id:
-            await session.execute(
-                Transaction.__table__.update()
-                .where(Transaction.id.in_(ids), Transaction.category_id.is_(None))
-                .values(category_id=series.category_id, category_source="statement")
-            )
+        await _apply_series(session, ids, series)
     st.status, st.approved_at = "approved", datetime.now(UTC)
     return st
 

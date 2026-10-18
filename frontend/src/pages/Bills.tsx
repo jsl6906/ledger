@@ -1,9 +1,10 @@
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { del, get, post, upload, type Series, type SeriesPoint, type Statement, type Usage } from '../api'
+import { del, get, post, upload, type LinkCandidate, type Series, type SeriesPoint, type Statement, type Transaction, type Usage } from '../api'
 import { CategorySelect } from '../components/CategorySelect'
 import { LineChart } from '../components/LineChart'
+import { TxnSearch } from '../components/TxnSearch'
 import { Button, Card, ErrorNote, Field, SortTh, TableCard } from '../components/ui'
 import { fullDate, money, shortDate } from '../format'
 import { categoryPath, txnPath } from '../links'
@@ -17,6 +18,10 @@ const monthOf = (d: string | null) => (d ? `${MONTHS[Number(d.slice(5, 7)) - 1]}
 const fmtUsage = (v: string | number | null, unit: string | null) =>
   v === null ? '—'
     : `${Number(v).toLocaleString(undefined, { maximumFractionDigits: Math.abs(Number(v)) >= 100 ? 0 : 2 })} ${unit ?? ''}`.trim()
+const asCandidate = (t: Transaction): LinkCandidate => ({
+  transaction_id: t.id, date: t.txn_date, amount: t.amount, description: t.description, score: 1, reason: 'Chosen by you',
+})
+const candidateLabel = (c: LinkCandidate) => `${shortDate(c.date)} · ${c.description} · ${money(c.amount)}`
 
 export function Bills() {
   const qc = useQueryClient()
@@ -60,7 +65,10 @@ export function Bills() {
           {series.data?.length === 0 && <div className="small text-muted">Series appear as you approve statements.</div>}
         </nav>
         <div className="stack-3" style={{ minWidth: 0 }}>
-          {(pending.data ?? []).map((s) => <Suggestion key={`${s.id}-${s.status}`} st={s} series={series.data ?? []} />)}
+          {(pending.data ?? []).map((s) => (
+            <Suggestion key={`${s.id}-${s.status}-${s.suggestion.refreshed_at ?? ''}`} st={s} series={series.data ?? []} />
+          ))}
+          <UnlinkedReceipts />
           {selected && <SeriesView id={selected} series={series.data?.find((s) => s.id === selected)} />}
         </div>
       </div>
@@ -77,6 +85,7 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
   const [newName, setNewName] = useState(sug.new_series_name ?? '')
   const [newCat, setNewCat] = useState<number | null>(sug.new_series_category_id ?? null)
   const [links, setLinks] = useState<number[]>(sug.transaction_ids ?? [])
+  const [picked, setPicked] = useState<LinkCandidate[]>([])
   const [fields, setFields] = useState({
     vendor: st.vendor ?? '', period_start: st.period_start ?? '', period_end: st.period_end ?? '',
     due_date: st.due_date ?? '', amount_due: st.amount_due ?? '',
@@ -99,6 +108,7 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
   })
   const dismiss = useMutation({ mutationFn: () => post(`/statements/${st.id}/dismiss`), onSuccess: done })
   const retry = useMutation({ mutationFn: () => post(`/statements/${st.id}/reprocess`), onSuccess: done })
+  const refresh = useMutation({ mutationFn: () => post(`/statements/${st.id}/refresh-links`), onSuccess: done })
   const remove = useMutation({ mutationFn: () => del(`/statements/${st.id}`), onSuccess: done })
   const primary = usage.find((u) => u.is_primary) ?? usage[0]
 
@@ -124,7 +134,10 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
       </Card>
     )
   }
-  const candidates = sug.candidates ?? []
+  const candidates = [
+    ...(sug.candidates ?? []),
+    ...picked.filter((p) => !(sug.candidates ?? []).some((c) => c.transaction_id === p.transaction_id)),
+  ]
   return (
     <Card style={{ borderColor: 'var(--color-accent-400)', gap: 'var(--space-3)' }}>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -142,9 +155,10 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: 'var(--space-3)', fontSize: 13 }}>
           <div><div className="text-muted" style={{ fontSize: 11 }}>Link to</div>
             <div style={{ fontWeight: 500 }}>
-              {links.length === 0 ? 'No matching payment found' : candidates.filter((c) => links.includes(c.transaction_id))
-                .map((c) => `${shortDate(c.date)} · ${c.description} · ${money(c.amount)}`).join('; ')}
-            </div></div>
+              {links.length === 0 ? 'No matching payment yet' : candidates.filter((c) => links.includes(c.transaction_id))
+                .map(candidateLabel).join('; ')}
+            </div>
+            {links.length === 0 && <div className="small text-muted">Matched automatically once the payment syncs.</div>}</div>
           <div><div className="text-muted" style={{ fontSize: 11 }}>Series</div>
             <div style={{ fontWeight: 500 }}>
               {oneOff ? 'One-off receipt (no bill)' : seriesId ? series.find((s) => s.id === seriesId)?.name : `${newName} (new)`}
@@ -197,26 +211,89 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
           )}
           <div className="stack">
             <div className="card-kicker">Link to payment</div>
-            {candidates.length === 0 && <div className="small text-muted">No payment of a matching amount near the due date.</div>}
+            {candidates.length === 0 && <div className="small text-muted">No payment of a matching amount near the due date yet. Search below, or leave it to be matched when the payment syncs.</div>}
             {candidates.map((c) => (
               <label key={c.transaction_id} className="radio" style={{ alignItems: 'flex-start' }}>
                 <input type="checkbox" checked={links.includes(c.transaction_id)}
                   onChange={(e) => setLinks(e.target.checked ? [...links, c.transaction_id] : links.filter((x) => x !== c.transaction_id))} />
-                <span>{shortDate(c.date)} · {c.description} · {money(c.amount)}
+                <span>{candidateLabel(c)}
                   <span className="small text-muted"> — {c.reason}</span></span>
               </label>
             ))}
+            <TxnSearch exclude={links} onPick={(t) => {
+              if (!candidates.some((c) => c.transaction_id === t.id)) setPicked([...picked, asCandidate(t)])
+              setLinks([...links, t.id])
+            }} />
           </div>
         </div>
       )}
-      <ErrorNote error={approve.error || dismiss.error} />
+      <ErrorNote error={approve.error || dismiss.error || refresh.error} />
       <div className="row">
         <Button variant="primary" onClick={() => approve.mutate()} disabled={approve.isPending || (!oneOff && !seriesId && !newName.trim())}>Approve</Button>
         <Button onClick={() => setEditing(!editing)}>{editing ? 'Done editing' : 'Edit fields'}</Button>
+        <Button onClick={() => refresh.mutate()} disabled={refresh.isPending}
+          title="Look for the payment again, e.g. after it has synced">{refresh.isPending ? 'Searching…' : 'Refresh matches'}</Button>
         <Button variant="ghost" onClick={() => dismiss.mutate()} disabled={dismiss.isPending}>Dismiss</Button>
         {sug.series_reason && <span className="small text-muted" style={{ marginLeft: 'auto' }}>{sug.series_reason}</span>}
       </div>
     </Card>
+  )
+}
+
+function UnlinkedReceipts() {
+  const unlinked = useQuery({
+    queryKey: ['statements', 'unlinked'],
+    queryFn: () => get<Statement[]>('/statements', { status: 'approved', unlinked: true }),
+  })
+  // Unpaid bills in a series already show under their series; this catches one-off receipts that would vanish.
+  const rows = (unlinked.data ?? []).filter((s) => s.series_id === null)
+  if (rows.length === 0) return <ErrorNote error={unlinked.error} />
+  return (
+    <Card style={{ gap: 'var(--space-3)' }}>
+      <div>
+        <div className="card-kicker">Receipts without a payment · {rows.length}</div>
+        <div className="small text-muted">Approved before their payment arrived. Matches refresh as transactions sync.</div>
+      </div>
+      {rows.map((s) => <UnlinkedReceipt key={`${s.id}-${s.suggestion.refreshed_at ?? ''}`} st={s} />)}
+    </Card>
+  )
+}
+
+function UnlinkedReceipt({ st }: { st: Statement }) {
+  const qc = useQueryClient()
+  const [searching, setSearching] = useState(false)
+  const done = () => {
+    qc.invalidateQueries({ queryKey: ['statements'] })
+    qc.invalidateQueries({ queryKey: ['transactions'] })
+  }
+  const link = useMutation({
+    mutationFn: (id: number) => post<Statement>(`/statements/${st.id}/transactions`, { transaction_ids: [id] }),
+    onSuccess: done,
+  })
+  const refresh = useMutation({ mutationFn: () => post(`/statements/${st.id}/refresh-links`), onSuccess: done })
+  const candidates = st.suggestion.candidates ?? []
+  return (
+    <div className="stack" style={{ borderTop: '1px solid var(--color-divider)', paddingTop: 'var(--space-2)' }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <div style={{ minWidth: 0 }}>
+          <a href={`/api/attachments/${st.attachment_id}/content`} target="_blank" rel="noreferrer" style={{ fontWeight: 500 }}>{st.filename}</a>
+          <span className="small text-muted"> · {st.vendor ?? st.document_type} · {periodLabel(st)} · {money(st.amount_due)}</span>
+        </div>
+        <div className="row">
+          <Button className="small" onClick={() => refresh.mutate()} disabled={refresh.isPending}>{refresh.isPending ? 'Searching…' : 'Refresh matches'}</Button>
+          <Button className="small" variant="ghost" onClick={() => setSearching(!searching)}>{searching ? 'Close search' : 'Find payment'}</Button>
+        </div>
+      </div>
+      {candidates.length === 0 && !searching && <div className="small text-muted">No matching payment yet.</div>}
+      {candidates.map((c) => (
+        <div key={c.transaction_id} className="row small" style={{ justifyContent: 'space-between', flexWrap: 'nowrap' }}>
+          <span style={{ minWidth: 0 }}>{candidateLabel(c)}<span className="text-muted"> — {c.reason}</span></span>
+          <button type="button" className="btn btn-ghost small" disabled={link.isPending} onClick={() => link.mutate(c.transaction_id)}>Link</button>
+        </div>
+      ))}
+      {searching && <TxnSearch onPick={(t) => link.mutate(t.id)} />}
+      <ErrorNote error={link.error || refresh.error} />
+    </div>
   )
 }
 

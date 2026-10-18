@@ -222,6 +222,66 @@ function NotesSection({ txnId }: { txnId: number }) {
   )
 }
 
+const DAY_MS = 86_400_000
+
+/** Link a receipt or bill that was filed before this transaction arrived, instead of uploading it again. */
+function LinkReceipt({ txn }: { txn: Transaction }) {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)
+  const loose = useQuery({
+    queryKey: ['statements', 'unlinked', 'any'],
+    queryFn: () => get<Statement[]>('/statements', { status: ['suggested', 'approved'], unlinked: true, limit: 200 }),
+    enabled: open,
+  })
+  const link = useMutation({
+    mutationFn: (sid: number) => post<Statement>(`/statements/${sid}/transactions`, { transaction_ids: [txn.id] }),
+    onSuccess: (st) => {
+      qc.invalidateQueries({ queryKey: ['statements'] })
+      qc.invalidateQueries({ queryKey: ['transactions'] })
+      // Ones awaiting approval only get this payment pre-selected; finish them on the Bills page.
+      if (st.status !== 'approved') navigate('/bills')
+      else setOpen(false)
+    },
+  })
+  const spent = Math.abs(Number(txn.amount))
+  const when = parseIso(txn.txn_date).getTime()
+  const closeness = (s: Statement) => {
+    const day = s.statement_date ?? s.period_end ?? s.due_date
+    const amountOff = s.amount_due === null ? spent : Math.abs(Number(s.amount_due) - spent)
+    return amountOff * 10 + (day ? Math.abs(parseIso(day).getTime() - when) / DAY_MS : 365)
+  }
+  const rows = [...(loose.data ?? [])].sort((a, b) => closeness(a) - closeness(b)).slice(0, 8)
+  if (!open) {
+    return (
+      <Button className="btn-block" style={{ margin: 0 }} variant="ghost" onClick={() => setOpen(true)}>
+        Link an uploaded receipt or bill
+      </Button>
+    )
+  }
+  return (
+    <div className="stack" style={{ border: '1px solid var(--color-divider)', padding: 8 }}>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <span className="small muted-2">Receipts and bills without a payment, closest first</span>
+        <button type="button" className="link-btn" onClick={() => setOpen(false)}>Close</button>
+      </div>
+      {loose.isLoading && <div className="small muted-2">Loading…</div>}
+      {!loose.isLoading && rows.length === 0 && <div className="small muted-2">Every uploaded document already has a payment.</div>}
+      {rows.map((s) => (
+        <div key={s.id} className="row small" style={{ justifyContent: 'space-between', flexWrap: 'nowrap' }}>
+          <span style={{ minWidth: 0 }}>
+            {s.vendor ?? s.filename} · {money(s.amount_due)}
+            {(s.statement_date ?? s.due_date) && ` · ${shortDate((s.statement_date ?? s.due_date)!)}`}
+            {s.status !== 'approved' && <span className="muted-2"> · awaiting approval</span>}
+          </span>
+          <button type="button" className="btn btn-ghost small" disabled={link.isPending} onClick={() => link.mutate(s.id)}>Link</button>
+        </div>
+      ))}
+      <ErrorNote error={loose.error || link.error} />
+    </div>
+  )
+}
+
 export function TransactionDetail({ txn, defaultAccountId, standalone = false, onClose, onSaved }: Props) {
   const qc = useQueryClient()
   const accounts = useAccounts()
@@ -468,6 +528,8 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
           <Button className="btn-block" style={{ margin: 0 }} disabled={attach.isPending} onClick={() => fileInput.current?.click()}>
             {attach.isPending ? 'Uploading…' : 'Attach statement (PDF, image)'}
           </Button>
+          <LinkReceipt txn={txn} />
+          <ErrorNote error={attach.error} />
         </div>
       )}
 

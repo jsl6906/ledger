@@ -510,6 +510,10 @@ class StatementApprove(BaseModel):
     usage: list[UsageIn] | None = None
 
 
+class StatementLink(BaseModel):
+    transaction_ids: list[int] = Field(min_length=1)
+
+
 class SeriesIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     vendor: str | None = None

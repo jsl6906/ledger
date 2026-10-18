@@ -11,8 +11,22 @@ from ledger.db.engine import get_session
 from ledger.imports.service import ImportError_
 from ledger.jobs.worker import enqueue, notify_worker
 from ledger.models import Category, Statement, StatementSeries, StatementUsage, statement_transaction
-from ledger.schemas import SeriesIn, SeriesOut, SeriesPoint, StatementApprove, StatementOut, UsageOut
-from ledger.statements.service import approve_statement, create_statement, linked_transactions
+from ledger.schemas import (
+    SeriesIn,
+    SeriesOut,
+    SeriesPoint,
+    StatementApprove,
+    StatementLink,
+    StatementOut,
+    UsageOut,
+)
+from ledger.statements.service import (
+    add_links,
+    approve_statement,
+    create_statement,
+    linked_transactions,
+    refresh_links,
+)
 
 router = APIRouter(tags=["statements"])
 
@@ -76,6 +90,7 @@ async def upload_statement(
 async def list_statements(
     status: list[str] | None = Query(None),
     series_id: int | None = None,
+    unlinked: bool = False,
     limit: int = Query(100, le=1000),
     session: AsyncSession = Depends(get_session),
 ):
@@ -84,6 +99,8 @@ async def list_statements(
         q = q.where(Statement.status.in_(status))
     if series_id:
         q = q.where(Statement.series_id == series_id)
+    if unlinked:
+        q = q.where(Statement.id.not_in(select(statement_transaction.c.statement_id)))
     rows = (await session.scalars(q)).unique().all()
     links = await linked_transactions(session, [s.id for s in rows])
     return [_out(s, links.get(s.id, [])) for s in rows]
@@ -122,6 +139,31 @@ async def approve(sid: int, body: StatementApprove, session: AsyncSession = Depe
 async def dismiss(sid: int, session: AsyncSession = Depends(get_session)):
     st = await _get(session, sid)
     st.status = "dismissed"
+    await session.commit()
+    return await _one(session, sid)
+
+
+@router.post("/statements/{sid}/refresh-links", response_model=StatementOut)
+async def refresh(sid: int, session: AsyncSession = Depends(get_session)):
+    """Look for the payment again (e.g. once it has synced) without re-reading the document."""
+    st = await _get(session, sid)
+    if st.status not in ("suggested", "approved"):
+        raise HTTPException(409, f"Statement is {st.status}")
+    await refresh_links(session, st)
+    await session.commit()
+    return await _one(session, sid)
+
+
+@router.post("/statements/{sid}/transactions", response_model=StatementOut)
+async def link_transactions(sid: int, body: StatementLink, session: AsyncSession = Depends(get_session)):
+    st = await _get(session, sid)
+    if st.status not in ("processing", "suggested", "approved"):
+        raise HTTPException(409, f"Statement is {st.status}")
+    try:
+        await add_links(session, st, body.transaction_ids)
+    except ImportError_ as exc:
+        await session.rollback()
+        raise HTTPException(422, str(exc)) from None
     await session.commit()
     return await _one(session, sid)
 

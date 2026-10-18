@@ -43,6 +43,7 @@ from ledger.schemas import (
 from ledger.services import merchants
 from ledger.services.categorize import apply_rules, describe, learn_rule
 from ledger.services.normalize import fingerprint
+from ledger.statements.service import relink_after_insert
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -363,6 +364,7 @@ async def create_transaction(body: TransactionCreate, session: AsyncSession = De
     await session.flush()
     if body.category_id is None:
         await apply_rules(session, [t.id])
+    await relink_after_insert(session, [t.id])
     await session.commit()
     return to_out(await _load(session, t.id))
 
