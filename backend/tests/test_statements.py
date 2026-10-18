@@ -109,6 +109,54 @@ async def test_bill_upload_suggest_and_approve(client, monkeypatch):
     assert st2["series_id"] == series["id"]
 
 
+async def test_one_off_receipt_skips_series(client, monkeypatch):
+    import ledger.jobs.worker as worker
+    from ledger.ai import statements as ai_st
+    from ledger.statements.jobs import extract_bill_job
+
+    monkeypatch.setattr(worker.JobContext, "progress", _no_progress)
+    acct = (await client.post("/api/accounts", json={"name": "Repairs Checking"})).json()
+    pay = (
+        await client.post(
+            "/api/transactions",
+            json={"txn_date": "2026-05-02", "description": "ACME ROOFING", "amount": "-950.00", "account_id": acct["id"]},
+        )
+    ).json()
+
+    async def fake_extract(data, mime_type, filename):
+        return ai_st.BillExtraction(
+            document_type="receipt",
+            vendor="Acme Roofing",
+            service_type=None,
+            statement_date="2026-05-01",
+            amount_due=950.0,
+            usage=[],
+            summary="Roof repair invoice",
+        )
+
+    monkeypatch.setattr(ai_st, "extract_bill", fake_extract)
+    r = await client.post("/api/statements", files={"file": ("roof.pdf", b"%PDF-1.7 roof", "application/pdf")})
+    await extract_bill_job(JobContext(0, "extract_bill", {"statement_id": r.json()["id"]}))
+    st = (await client.get(f"/api/statements/{r.json()['id']}")).json()
+    assert st["suggestion"]["one_off"] is True
+    assert st["suggestion"]["transaction_ids"] == [pay["id"]]
+
+    st = (await client.post(f"/api/statements/{st['id']}/approve", json={"transaction_ids": [pay["id"]]})).json()
+    assert st["status"] == "approved" and st["series_id"] is None
+    assert [t["id"] for t in st["transactions"]] == [pay["id"]]
+    assert "Acme Roofing" not in [s["name"] for s in (await client.get("/api/statement-series")).json()]
+    t = (await client.get(f"/api/transactions/{pay['id']}")).json()
+    assert t["has_statement"] is True and t["tags"] == []
+
+    # Choosing a series overrides the one-off suggestion
+    st = (
+        await client.post(
+            f"/api/statements/{st['id']}/approve", json={"new_series_name": "Roofing", "transaction_ids": [pay["id"]]}
+        )
+    ).json()
+    assert st["series_name"] == "Roofing"
+
+
 async def test_statement_rejects_spreadsheets(client):
     r = await client.post("/api/statements", files={"file": ("x.csv", b"a,b\n1,2\n", "text/csv")})
     assert r.status_code == 422

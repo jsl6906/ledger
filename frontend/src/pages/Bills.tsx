@@ -73,6 +73,7 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
   const sug = st.suggestion
   const [editing, setEditing] = useState(false)
   const [seriesId, setSeriesId] = useState<number | null>(sug.series_id ?? null)
+  const [oneOff, setOneOff] = useState<boolean>(!!sug.one_off && !sug.series_id)
   const [newName, setNewName] = useState(sug.new_series_name ?? '')
   const [newCat, setNewCat] = useState<number | null>(sug.new_series_category_id ?? null)
   const [links, setLinks] = useState<number[]>(sug.transaction_ids ?? [])
@@ -88,7 +89,8 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
   }
   const approve = useMutation({
     mutationFn: () => post<Statement>(`/statements/${st.id}/approve`, {
-      series_id: seriesId, new_series_name: seriesId ? null : newName, new_series_category_id: seriesId ? null : newCat,
+      one_off: oneOff, series_id: oneOff ? null : seriesId,
+      new_series_name: oneOff || seriesId ? null : newName, new_series_category_id: oneOff || seriesId ? null : newCat,
       transaction_ids: links, vendor: fields.vendor || null, period_start: fields.period_start || null,
       period_end: fields.period_end || null, due_date: fields.due_date || null, amount_due: fields.amount_due || null,
       usage: usage.map((u) => ({ metric: u.metric, value: u.value, unit: u.unit, is_primary: u.is_primary })),
@@ -144,7 +146,9 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
                 .map((c) => `${shortDate(c.date)} · ${c.description} · ${money(c.amount)}`).join('; ')}
             </div></div>
           <div><div className="text-muted" style={{ fontSize: 11 }}>Series</div>
-            <div style={{ fontWeight: 500 }}>{seriesId ? series.find((s) => s.id === seriesId)?.name : `${newName} (new)`}</div></div>
+            <div style={{ fontWeight: 500 }}>
+              {oneOff ? 'One-off receipt (no bill)' : seriesId ? series.find((s) => s.id === seriesId)?.name : `${newName} (new)`}
+            </div></div>
           <div><div className="text-muted" style={{ fontSize: 11 }}>Period</div>
             <div style={{ fontWeight: 500 }}>{periodLabel(st)}</div></div>
           <div><div className="text-muted" style={{ fontSize: 11 }}>Amount · usage</div>
@@ -154,13 +158,17 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
         <div className="stack-3">
           <div className="grid-form">
             <Field label="Series">
-              <select className="input" value={seriesId ?? ''} onChange={(e) => setSeriesId(e.target.value ? Number(e.target.value) : null)}>
+              <select className="input" value={oneOff ? 'oneoff' : seriesId ?? ''} onChange={(e) => {
+                setOneOff(e.target.value === 'oneoff')
+                setSeriesId(e.target.value && e.target.value !== 'oneoff' ? Number(e.target.value) : null)
+              }}>
+                <option value="oneoff">One-off receipt (no bill)</option>
                 <option value="">New series…</option>
                 {series.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </Field>
-            {!seriesId && <Field label="New series name"><input className="input" value={newName} onChange={(e) => setNewName(e.target.value)} /></Field>}
-            {!seriesId && <Field label="Category for payments"><CategorySelect value={newCat} onChange={setNewCat} emptyLabel="Leave as is" /></Field>}
+            {!seriesId && !oneOff && <Field label="New series name"><input className="input" value={newName} onChange={(e) => setNewName(e.target.value)} /></Field>}
+            {!seriesId && !oneOff && <Field label="Category for payments"><CategorySelect value={newCat} onChange={setNewCat} emptyLabel="Leave as is" /></Field>}
           </div>
           <div className="grid-form">
             <Field label="Vendor"><input className="input" value={fields.vendor} onChange={(e) => setFields({ ...fields, vendor: e.target.value })} /></Field>
@@ -203,7 +211,7 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
       )}
       <ErrorNote error={approve.error || dismiss.error} />
       <div className="row">
-        <Button variant="primary" onClick={() => approve.mutate()} disabled={approve.isPending || (!seriesId && !newName.trim())}>Approve</Button>
+        <Button variant="primary" onClick={() => approve.mutate()} disabled={approve.isPending || (!oneOff && !seriesId && !newName.trim())}>Approve</Button>
         <Button onClick={() => setEditing(!editing)}>{editing ? 'Done editing' : 'Edit fields'}</Button>
         <Button variant="ghost" onClick={() => dismiss.mutate()} disabled={dismiss.isPending}>Dismiss</Button>
         {sug.series_reason && <span className="small text-muted" style={{ marginLeft: 'auto' }}>{sug.series_reason}</span>}

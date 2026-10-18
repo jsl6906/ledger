@@ -488,7 +488,7 @@ export interface LinkCandidate {
   transaction_id: number; date: string; amount: string; description: string; score: number; reason: string
 }
 export interface StatementSuggestion {
-  series_id?: number | null; series_reason?: string; new_series_name?: string | null
+  series_id?: number | null; series_reason?: string; new_series_name?: string | null; one_off?: boolean
   new_series_category_id?: number | null; service_type?: string | null; candidates?: LinkCandidate[]
   transaction_ids?: number[]; preset_transaction_ids?: number[]
 }

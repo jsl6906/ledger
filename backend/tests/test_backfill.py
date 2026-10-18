@@ -129,7 +129,7 @@ async def test_local_backfill_end_to_end(client, inbox, fake_ai):
 
     # The bill was filed after the statement, so it found and linked the payment
     async with get_sessionmaker()() as s:
-        acct = await s.scalar(select(Account).where(Account.name == "TB Bank Â·Â·Â·5291"))
+        acct = await s.scalar(select(Account).where(Account.name == "TB Bank ···5291"))
         assert acct is not None and acct.mask == "5291"
         water = await s.scalar(select(Transaction).where(Transaction.description == "CITY WATER UTIL"))
         assert water.account_id == acct.id and water.source_type == "backfill" and water.txn_date == date(2019, 1, 25)
@@ -301,6 +301,7 @@ async def test_statement_gate_skips_balance_check_where_balances_drift(client, m
     from ledger.imports.service import store_attachment
 
     last4 = {"investment": "7101", "loan": "7102", "checking": "7103"}[account_type]
+    amount = {"investment": 11.23, "loan": 12.34, "checking": 13.45}[account_type]
 
     async def extract(data, mime, filename):
         return ai_imports.ExtractedStatement(
@@ -315,7 +316,9 @@ async def test_statement_gate_skips_balance_check_where_balances_drift(client, m
             sign_note="test",
             summary="Drift statement",
             transactions=[
-                ai_imports.ExtractedTxn(date="2020-03-16", description="DRIFT DIVIDEND", amount=11.23, confidence=0.99)
+                ai_imports.ExtractedTxn(
+                    date="2020-03-16", description=f"DRIFT {account_type}", amount=amount, confidence=0.99
+                )
             ],
         )
 
@@ -332,7 +335,7 @@ async def test_statement_gate_skips_balance_check_where_balances_drift(client, m
         await backfill.import_file(s, bf, await backfill.load_settings(s))
         await s.commit()
         if flagged:
-            assert bf.status == "review" and "rows sum to 11.23" in bf.message, bf.message
+            assert bf.status == "review" and f"rows sum to {amount}" in bf.message, bf.message
         else:
             assert bf.status == "done", bf.message
             [check] = (await client.get(f"/api/imports/{bf.import_batch_id}/checks")).json()

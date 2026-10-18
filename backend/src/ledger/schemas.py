@@ -499,6 +499,8 @@ class StatementApprove(BaseModel):
     series_id: int | None = None
     new_series_name: str | None = Field(default=None, max_length=120)
     new_series_category_id: int | None = None
+    # A one-off receipt/invoice: attach it to its payment(s) without filing it under a recurring bill series.
+    one_off: bool = False
     transaction_ids: list[int] = []
     vendor: str | None = None
     statement_date: date | None = None

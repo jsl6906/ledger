@@ -177,6 +177,8 @@ async def extract_into_statement(session: AsyncSession, st: Statement) -> dict:
         "series_reason": series_reason,
         "new_series_name": None if series_id else (r.service_type or r.vendor or "Other bills"),
         "new_series_category_id": None if series_id else await _category_for(session, r.service_type),
+        # No recurring service and no existing series: a one-off receipt, not a new bill named after the vendor.
+        "one_off": series_id is None and not r.service_type,
         "service_type": r.service_type,
         "candidates": candidates,
         "transaction_ids": presets
@@ -191,14 +193,7 @@ async def _series_tag(session: AsyncSession, name: str) -> int:
     return await session.scalar(select(Tag.id).where(Tag.name == name[:80]))
 
 
-async def approve_statement(session: AsyncSession, st: Statement, body) -> Statement:
-    """body: schemas.StatementApprove."""
-    for f in ("vendor", "period_start", "period_end", "statement_date", "due_date", "amount_due"):
-        if f in body.model_fields_set:
-            setattr(st, f, getattr(body, f))
-    if body.usage is not None:
-        st.usage = [StatementUsage(metric=u.metric, value=u.value, unit=u.unit, is_primary=u.is_primary) for u in body.usage]
-
+async def _resolve_series(session: AsyncSession, st: Statement, body) -> StatementSeries:
     series_id = body.series_id if "series_id" in body.model_fields_set else None
     if series_id is None and not body.new_series_name and "series_id" not in body.model_fields_set:
         series_id = st.suggestion.get("series_id")
@@ -227,7 +222,23 @@ async def approve_statement(session: AsyncSession, st: Statement, body) -> State
         series.primary_metric, series.unit = primary.metric, primary.unit
     if not series.vendor and st.vendor:
         series.vendor = st.vendor
-    st.series_id = series.id
+    return series
+
+
+async def approve_statement(session: AsyncSession, st: Statement, body) -> Statement:
+    """body: schemas.StatementApprove."""
+    for f in ("vendor", "period_start", "period_end", "statement_date", "due_date", "amount_due"):
+        if f in body.model_fields_set:
+            setattr(st, f, getattr(body, f))
+    if body.usage is not None:
+        st.usage = [StatementUsage(metric=u.metric, value=u.value, unit=u.unit, is_primary=u.is_primary) for u in body.usage]
+
+    chose_series = "series_id" in body.model_fields_set or bool(body.new_series_name)
+    one_off = body.one_off if "one_off" in body.model_fields_set else (
+        not chose_series and bool(st.suggestion.get("one_off"))
+    )
+    series = None if one_off else await _resolve_series(session, st, body)
+    st.series_id = series.id if series else None
 
     ids = list(dict.fromkeys(body.transaction_ids))
     if ids:
@@ -241,6 +252,7 @@ async def approve_statement(session: AsyncSession, st: Statement, body) -> State
         await session.execute(
             insert(statement_transaction).values([{"statement_id": st.id, "transaction_id": i} for i in ids])
         )
+    if ids and series:
         await session.execute(
             insert(transaction_tag)
             .values([{"transaction_id": i, "tag_id": series.tag_id} for i in ids])

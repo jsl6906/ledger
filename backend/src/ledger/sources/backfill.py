@@ -311,9 +311,10 @@ async def _import_bill(session: AsyncSession, bf: BackfillFile, att: Attachment,
         return
     ids = st.suggestion.get("transaction_ids", [])
     await approve_statement(session, st, StatementApprove(transaction_ids=ids))
-    series = await session.get(StatementSeries, st.series_id)
+    series = await session.get(StatementSeries, st.series_id) if st.series_id else None
     bf.status = "done"
-    bf.message = f"Filed under {series.name}" + (" and linked to its payment" if ids else "; no matching payment found")
+    filed = f"Filed under {series.name}" if series else "Filed as a one-off receipt"
+    bf.message = filed + (" and linked to its payment" if ids else "; no matching payment found")
 
 
 async def import_file(session: AsyncSession, bf: BackfillFile, cfg: dict) -> list[int]:
