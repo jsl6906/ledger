@@ -234,8 +234,8 @@ async def approve_statement(session: AsyncSession, st: Statement, body) -> State
         st.usage = [StatementUsage(metric=u.metric, value=u.value, unit=u.unit, is_primary=u.is_primary) for u in body.usage]
 
     chose_series = "series_id" in body.model_fields_set or bool(body.new_series_name)
-    one_off = body.one_off if "one_off" in body.model_fields_set else (
-        not chose_series and bool(st.suggestion.get("one_off"))
+    one_off = (
+        body.one_off if "one_off" in body.model_fields_set else (not chose_series and bool(st.suggestion.get("one_off")))
     )
     series = None if one_off else await _resolve_series(session, st, body)
     st.series_id = series.id if series else None
