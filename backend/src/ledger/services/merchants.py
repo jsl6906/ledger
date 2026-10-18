@@ -1,7 +1,6 @@
 """Merchant identity: automatic keys from descriptions, user merges (aliases), display names, per-transaction overrides."""
 
 import re
-from string import capwords
 
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +10,7 @@ from ledger.models import CategoryRule, MerchantProfile, MerchantSuggestion, Tra
 from ledger.services.normalize import normalize_merchant
 
 _USER_NON_WORD = re.compile(r"[^a-z0-9&' ]+")
+_SMALL_WORDS = {"a", "an", "and", "at", "for", "in", "of", "on", "or", "the", "to"}
 
 
 class MerchantError(ValueError):
@@ -18,7 +18,10 @@ class MerchantError(ValueError):
 
 
 def default_name(key: str | None) -> str | None:
-    return capwords(key) if key else None
+    """Title-case a merchant key, keeping minor words lowercase ('bank of america' -> 'Bank of America')."""
+    if not key:
+        return None
+    return " ".join(w if i and w in _SMALL_WORDS else w.capitalize() for i, w in enumerate(key.split()))
 
 
 def user_key(name: str) -> str | None:
