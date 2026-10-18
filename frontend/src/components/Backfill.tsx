@@ -10,6 +10,7 @@ const KIND_LABEL: Record<string, string> = {
   credit_card_statement: 'Card statement',
   loan_statement: 'Loan statement',
   investment_statement: 'Investment statement',
+  annual_summary: 'Annual summary',
   utility_bill: 'Utility bill',
   other_bill: 'Bill',
   spreadsheet: 'Spreadsheet',
@@ -18,7 +19,7 @@ const KIND_LABEL: Record<string, string> = {
   other: 'Other',
 }
 const GROUPS: [string, string[]][] = [
-  ['Bank statements', ['bank_statement', 'loan_statement', 'investment_statement']],
+  ['Bank statements', ['bank_statement', 'loan_statement', 'investment_statement', 'annual_summary']],
   ['Card statements', ['credit_card_statement']],
   ['Bills', ['utility_bill', 'other_bill']],
   ['Spreadsheets', ['spreadsheet']],
@@ -31,7 +32,7 @@ const STATUS: Record<BackfillFileRow['status'], [string, string]> = {
   skipped: ['Skipped', 'tag-neutral'],
   failed: ['Failed', 'tag-outline'],
 }
-const KINDS = ['bank_statement', 'credit_card_statement', 'loan_statement', 'utility_bill', 'other_bill', 'spreadsheet']
+const KINDS = ['bank_statement', 'credit_card_statement', 'loan_statement', 'annual_summary', 'utility_bill', 'other_bill', 'spreadsheet']
 const SCAN_LABEL: Record<number, string> = { 1: 'Every hour', 6: 'Every 6 hours', 24: 'Daily', 168: 'Weekly' }
 
 export function BackfillCard() {

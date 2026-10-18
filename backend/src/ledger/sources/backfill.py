@@ -1,11 +1,13 @@
 """Historical backfill: scan an archive folder, classify each file with Gemini, then route it — statements and
-spreadsheets to the import pipeline, bills to Bills & statements — committing whatever passes the checks and
+spreadsheets to the import pipeline, bills to Bills & statements, and annual summaries (or investment statements
+without transaction lines) to the balance history of their account — committing whatever passes the checks and
 flagging the rest for review. Files are imported oldest-first, bills after the transactions they pay."""
 
 import hashlib
 import logging
 from collections import Counter
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from google.genai import errors as genai_errors
 from sqlalchemy import case, func, select, update
@@ -15,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ledger.imports.parsing import detect_kind, mapping_complete, parse_date
 from ledger.imports.service import (
     ImportError_,
+    _suggest_account,
     balance_confirms_rows,
     commit_batch,
     extract_into_batch,
@@ -22,7 +25,17 @@ from ledger.imports.service import (
     prepare_batch,
     store_attachment,
 )
-from ledger.models import AppSetting, Attachment, BackfillFile, ImportBatch, Source, Statement, StatementSeries
+from ledger.models import (
+    Account,
+    AccountBalance,
+    AppSetting,
+    Attachment,
+    BackfillFile,
+    ImportBatch,
+    Source,
+    Statement,
+    StatementSeries,
+)
 from ledger.models.backfill import BILL_KINDS, STATEMENT_KINDS
 from ledger.sources import archive
 from ledger.sources.service import FeedAccount, auto_resolve, ensure_account
@@ -44,11 +57,12 @@ DEFAULTS = {
 SKIP_KINDS = {
     "receipt": "Receipt",
     "tax_document": "Tax document",
-    "annual_summary": "Annual summary (its transactions come from the statements)",
     "other": "Not a statement or bill",
 }
 MIN_CONFIDENCE = 0.6
 FILES_PER_JOB = 20
+# Documents whose value to the ledger is the balance they report, not their activity.
+BALANCE_KINDS = ("annual_summary",)
 
 
 async def load_settings(session: AsyncSession) -> dict:
@@ -224,13 +238,13 @@ async def _resolve_accounts(session: AsyncSession, batch: ImportBatch) -> None:
     batch.defaults = defaults
 
 
-async def _import_statement(session: AsyncSession, bf: BackfillFile, att: Attachment) -> list[int]:
+async def _import_statement(session: AsyncSession, bf: BackfillFile, att: Attachment, result=None) -> list[int]:
     batch = ImportBatch(attachment_id=att.id, source_type="document", origin="backfill", status="extracting")
     batch.attachment = att
     session.add(batch)
     await session.flush()
     bf.import_batch_id = batch.id
-    await extract_into_batch(session, batch)
+    await extract_into_batch(session, batch, result)
     await _resolve_accounts(session, batch)
     await prepare_batch(session, batch)
     meta = batch.doc_meta or {}
@@ -317,10 +331,62 @@ async def _import_bill(session: AsyncSession, bf: BackfillFile, att: Attachment,
     bf.message = filed + (" and linked to its payment" if ids else "; no matching payment found")
 
 
+async def _extract(session: AsyncSession, att: Attachment):
+    from ledger.ai import imports as ai_imports
+
+    content = await session.scalar(select(Attachment.content).where(Attachment.id == att.id))
+    return await ai_imports.extract_statement(content, att.mime_type, att.filename)
+
+
+async def _import_balances(session: AsyncSession, bf: BackfillFile, att: Attachment, result=None) -> None:
+    """Record the closing balance of a statement that lists no transactions (annual summaries, many retirement plan
+    statements) on its ledger account, dated by the statement's period end; never adds transactions."""
+    result = result or await _extract(session, att)
+    as_of = parse_date(result.period_end) or parse_date((bf.detail.get("classification") or {}).get("period_end"))
+    found = [(a.last4, a.name, a.closing_balance) for a in result.accounts if a.closing_balance is not None]
+    if not found and result.closing_balance is not None:
+        found = [(result.account_last4, result.account_name, result.closing_balance)]
+    if as_of is None or not found:
+        bf.status, bf.message = "review", "No closing balance and statement date to record"
+        return
+    totals: dict[int, Decimal] = {}
+    for last4, name, closing in found:
+        account_id = await _suggest_account(session, result.institution, last4)
+        if account_id is None:
+            label = f"···{last4[-4:]}" if last4 else name or "this statement's account"
+            bf.status, bf.message = "review", f"No ledger account matches {label}; set its last 4 digits, then retry"
+            return
+        totals[account_id] = totals.get(account_id, Decimal(0)) + Decimal(str(closing)).quantize(Decimal("0.01"))
+    names = dict((await session.execute(select(Account.id, Account.name).where(Account.id.in_(totals)))).all())
+    for account_id, balance in totals.items():
+        stmt = insert(AccountBalance).values(account_id=account_id, as_of=as_of, balance=balance, source="statement")
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["account_id", "as_of", "source"], set_={"balance": stmt.excluded.balance}
+            )
+        )
+    bf.status = "done"
+    bf.detail = {
+        **bf.detail,
+        "balances": [{"account_id": i, "as_of": as_of.isoformat(), "balance": float(b)} for i, b in totals.items()],
+    }
+    bf.message = "Recorded " + ", ".join(f"{names[i]} {b:,.2f}" for i, b in totals.items()) + f" as of {as_of}"
+
+
 async def import_file(session: AsyncSession, bf: BackfillFile, cfg: dict) -> list[int]:
     att = await session.get(Attachment, bf.attachment_id) if bf.attachment_id else None
     if att is None:
         raise ImportError_("The downloaded file is missing; retry the file")
+    if bf.kind in BALANCE_KINDS:
+        await _import_balances(session, bf, att)
+        return []
+    if bf.kind == "investment_statement":
+        # Retirement plans often send statements with balances and fund activity but no transaction lines.
+        result = await _extract(session, att)
+        if not result.transactions:
+            await _import_balances(session, bf, att, result)
+            return []
+        return await _import_statement(session, bf, att, result)
     if bf.kind in STATEMENT_KINDS:
         return await _import_statement(session, bf, att)
     if bf.kind == "spreadsheet":

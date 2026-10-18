@@ -68,6 +68,7 @@ async def test_monthly_balances_endpoint(client):
     card = await account("BL Card", "credit_card")
     brk = await account("BL Brokerage", "investment")
     car = await account("BL Car Loan", "loan")
+    ira = await account("BL IRA", "retirement")
     for d, amt in (("2019-01-05", "1000.00"), ("2019-02-10", "-200.00"), ("2019-03-03", "-50.00")):
         await txn(chk, d, amt)
     await txn(sav, "2019-02-15", "25.00")
@@ -97,14 +98,22 @@ async def test_monthly_balances_endpoint(client):
         snapshots += ((loan, date(2019, 1, 1), "-240000"), (loan, date(2019, 3, 1), "-230000"))
         for acct, d, bal in snapshots:
             s.add(AccountBalance(account_id=acct, as_of=d, balance=D(bal), source="manual"))
+        # The IRA's feed starts mid-March; balances read off statements only count before that.
+        for d, bal, source in (
+            (date(2019, 3, 15), "9000", "tiller"),
+            (date(2019, 2, 28), "8500", "statement"),
+            (date(2019, 4, 15), "1", "statement"),
+        ):
+            s.add(AccountBalance(account_id=ira, as_of=d, balance=D(bal), source=source))
         closings = [
             (sav, "4321", True, date(2019, 1, 31), 5000.0),
             (sav, "4321", False, date(2019, 2, 28), 9999.0),
             (sav, "4321", True, "2019-02-30", 7777.0),  # unreadable period end
-            # Loan statements never reconcile (interest), so unverified ones count; signs vary by statement.
+            # Loan rows never reconcile (interest), so their statements count however that check came out; signs vary.
             (car, "8290", None, date(2019, 1, 31), 12000.0),
-            (car, "8290", False, date(2019, 2, 28), 99999.0),
-            (car, "8290", None, date(2019, 3, 31), -11000.0),
+            (car, "8290", False, date(2019, 3, 31), -11000.0),
+            (ira, "5413", None, date(2019, 1, 31), 8000.0),
+            (ira, "5413", None, date(2019, 3, 31), 1.0),
         ]
         for acct, ref, trusted, end, closing in closings:
             printed = end if isinstance(end, str) else end.isoformat()
@@ -147,6 +156,7 @@ async def test_monthly_balances_endpoint(client):
     assert rows[home]["values"] == pytest.approx([None, 300000 + 30000 * 30 / 59, 300000 + 30000 * 58 / 59, None, None])
     assert rows[loan]["values"] == pytest.approx([None, -240000 + 10000 * 30 / 59, -240000 + 10000 * 58 / 59, None, None])
     assert rows[car]["values"] == pytest.approx([None, -12000, -(12000 - 1000 * 28 / 59), -11000, -11000], abs=0.01)
+    assert rows[ira]["values"] == [None, 8000.0, 8500.0, 9000.0, 9000.0]
 
     def total(pick):
         return [round(sum(a["values"][i] or 0 for a in out["accounts"] if pick(a)), 2) for i in range(5)]

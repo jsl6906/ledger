@@ -704,12 +704,14 @@ def _row_account(value: str | None, accounts: list[dict]) -> str:
     return hits[0]["ref"] if len(hits) == 1 else v
 
 
-async def extract_into_batch(session: AsyncSession, batch: ImportBatch) -> dict:
+async def extract_into_batch(session: AsyncSession, batch: ImportBatch, result=None) -> dict:
+    """Read the batch's document into rows; `result` is the extraction when the caller already has it."""
     from ledger.ai.imports import StatementAccount, extract_statement
 
     att = batch.attachment
-    content = await session.scalar(select(Attachment.content).where(Attachment.id == att.id))
-    result = await extract_statement(content, att.mime_type, att.filename)
+    if result is None:
+        content = await session.scalar(select(Attachment.content).where(Attachment.id == att.id))
+        result = await extract_statement(content, att.mime_type, att.filename)
     if not result.transactions:
         raise ImportError_(f"No transactions found ({result.document_type}: {result.summary})")
     found = [a for a in result.accounts if a.last4 or a.name]

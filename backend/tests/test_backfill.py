@@ -1,7 +1,8 @@
 from datetime import date
+from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ledger.ai import backfill as ai_backfill
 from ledger.ai import imports as ai_imports
@@ -340,6 +341,70 @@ async def test_statement_gate_skips_balance_check_where_balances_drift(client, m
             assert bf.status == "done", bf.message
             [check] = (await client.get(f"/api/imports/{bf.import_batch_id}/checks")).json()
             assert check["trusted"] is None and check["status"] == "ok", check
+
+
+async def test_balance_only_statements_record_closing_balance(client, monkeypatch):
+    """Annual summaries, and investment statements without transaction lines, record their closing balance."""
+    from ledger.imports.service import store_attachment
+    from ledger.models import AccountBalance, Institution
+
+    async def extract(data, mime, filename):
+        last4, end, closing = {
+            "bo_annual.pdf": ("31783", "2015-12-31", 123456.78),
+            "bo_quarter.pdf": ("1783", "2016-03-31", 125000.0),
+            "bo_unknown.pdf": ("8899", "2016-12-31", 5.0),
+        }[filename]
+        return ai_imports.ExtractedStatement(
+            document_type="other",
+            institution="BO Thrift Plan",
+            period_end=end,
+            accounts=[ai_imports.StatementAccount(last4=last4, name="Plan", closing_balance=closing)],
+            sign_note="test",
+            summary="Annual participant statement",
+            transactions=[],
+        )
+
+    monkeypatch.setattr(ai_imports, "extract_statement", extract)
+    async with get_sessionmaker()() as s:
+        inst = Institution(name="BO Thrift Plan")
+        s.add(inst)
+        await s.flush()
+        plan = Account(name="BO Plan", institution_id=inst.id, account_type="retirement", mask="1783", external_refs={})
+        other = Account(
+            name="BO Other Plan", institution_id=inst.id, account_type="retirement", mask="5501", external_refs={}
+        )
+        s.add_all([plan, other])
+        await s.flush()
+        files = {}
+        for name, kind in (
+            ("bo_annual.pdf", "annual_summary"),
+            ("bo_quarter.pdf", "investment_statement"),
+            ("bo_unknown.pdf", "annual_summary"),
+        ):
+            att = await store_attachment(s, f"%PDF-1.4 {name}".encode(), name, None, source="backfill")
+            files[name] = bf = BackfillFile(provider="local", external_id=name, name=name, kind=kind, attachment_id=att.id)
+            s.add(bf)
+            await s.flush()
+            assert await backfill.import_file(s, bf, await backfill.load_settings(s)) == []
+        await s.commit()
+
+        assert files["bo_annual.pdf"].status == "done", files["bo_annual.pdf"].message
+        assert files["bo_annual.pdf"].message == "Recorded BO Plan 123,456.78 as of 2015-12-31"
+        assert files["bo_quarter.pdf"].status == "done" and files["bo_quarter.pdf"].import_batch_id is None
+        unknown = files["bo_unknown.pdf"]
+        assert unknown.status == "review" and "···8899" in unknown.message, unknown.message
+        recorded = (
+            await s.execute(
+                select(AccountBalance.as_of, AccountBalance.balance, AccountBalance.source)
+                .where(AccountBalance.account_id == plan.id)
+                .order_by(AccountBalance.as_of)
+            )
+        ).all()
+        assert [tuple(r) for r in recorded] == [
+            (date(2015, 12, 31), Decimal("123456.78"), "statement"),
+            (date(2016, 3, 31), Decimal("125000.00"), "statement"),
+        ]
+        assert await s.scalar(select(func.count()).select_from(Transaction).where(Transaction.account_id == plan.id)) == 0
 
 
 async def test_statement_account_not_guessed_from_another_number(client):

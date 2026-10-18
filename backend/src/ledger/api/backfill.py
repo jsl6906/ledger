@@ -16,7 +16,7 @@ from ledger.sources.google import service_account_email
 from ledger.sources.jobs import backfill_job_active, backfill_watchdog
 
 router = APIRouter(prefix="/backfill", tags=["backfill"])
-KINDS = (*STATEMENT_KINDS, *BILL_KINDS, "spreadsheet")
+KINDS = (*STATEMENT_KINDS, *BILL_KINDS, "spreadsheet", "annual_summary")
 
 
 @router.get("")

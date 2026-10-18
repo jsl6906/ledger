@@ -1,7 +1,8 @@
 """Month-end balances per account, for the net worth and checking + savings charts.
 
-Each account's balance at a month end comes from its latest snapshot on or before that day (account_balance rows, and
-the closing balances of statements for checking, savings, loans and mortgages). Checking and savings balances also move
+Each account's balance at a month end comes from its latest snapshot on or before that day: account_balance rows, and
+the closing balances of statements for checking, savings, loan, mortgage and investment accounts. Statement balances
+only fill in history before an account's Tiller or SimpleFIN feed starts. Checking and savings balances also move
 with the ledger: after a snapshot by the transactions since, and before the account's first snapshot by working back
 from it through the transactions in between (those points are marked estimated). Homes, vehicles, loans and mortgages
 move along a straight line between known values, a home's or vehicle's purchase price counting as one. Other accounts
@@ -15,6 +16,8 @@ from decimal import Decimal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from ledger.models.sources import SOURCE_KINDS
 
 LIABILITIES = ("credit_card", "loan", "mortgage")
 CASH = ("checking", "savings")
@@ -81,14 +84,15 @@ _ACCOUNTS = """--sql
     SELECT id, name, account_type, is_closed, is_hidden FROM account ORDER BY name
 """
 _SNAPSHOTS = """--sql
-    SELECT DISTINCT ON (account_id, as_of) account_id, as_of, balance FROM account_balance
-    ORDER BY account_id, as_of, created_at DESC
+    SELECT DISTINCT ON (account_id, as_of) account_id, as_of, balance, source FROM account_balance
+    ORDER BY account_id, as_of, source = 'statement', created_at DESC
 """
-# Statement closing balances, dated by the period end printed on the statement. Checking and savings statements count
-# only when their rows add up from the opening balance; loan and mortgage rows never do (interest), so theirs count
-# unless the statement was found unreliable. Credit card and investment statements are left out.
+# Statement closing balances, dated by the period end printed on the statement and summed over the statement's accounts
+# that map to the same ledger account. Checking and savings statements count only when their rows add up from the
+# opening balance. Loan, mortgage and investment rows can't confirm a balance (interest, market moves), so whether
+# theirs reconciled says nothing about the balance and every one counts. Credit card statements are left out.
 _STATEMENT_CLOSINGS = """--sql
-    SELECT sc.account_id, b.doc_meta->>'period_end' AS period_end,
+    SELECT sc.account_id, sc.import_batch_id, b.doc_meta->>'period_end' AS period_end,
            CASE WHEN sc.account_ref = '' THEN b.doc_meta->>'closing_balance'
                 ELSE (SELECT x->>'closing_balance'
                       FROM jsonb_array_elements(coalesce(b.doc_meta->'accounts', '[]'::jsonb)) x
@@ -99,7 +103,7 @@ _STATEMENT_CLOSINGS = """--sql
     JOIN account a ON a.id = sc.account_id
     WHERE b.status = 'committed'
       AND ((a.account_type IN ('checking', 'savings') AND sc.trusted)
-           OR (a.account_type IN ('loan', 'mortgage') AND sc.trusted IS NOT FALSE))
+           OR a.account_type IN ('loan', 'mortgage', 'investment', 'retirement'))
 """
 _FLOWS = """--sql
     SELECT account_id, coalesce(posted_date, txn_date) AS d, sum(amount) AS amount FROM "transaction"
@@ -125,14 +129,30 @@ async def monthly_balances(session: AsyncSession, start: date, end: date, today:
     today = today or date.today()
     points = month_points(start, end, today)
     accounts = {r.id: r for r in await session.execute(text(_ACCOUNTS))}
-    anchors: dict[int, dict[date, Decimal]] = {}
+    snapshots = (await session.execute(text(_SNAPSHOTS))).all()
+    # Statements fill in history before an account's feed starts; from then on the feed is the record.
+    feed_start: dict[int, date] = {}
+    for r in snapshots:
+        if r.source in SOURCE_KINDS:
+            feed_start.setdefault(r.account_id, r.as_of)
+
+    def before_feed(account_id: int, d: date) -> bool:
+        return account_id not in feed_start or d < feed_start[account_id]
+
+    closings: dict[tuple[int, int], tuple[date, Decimal]] = {}
     for r in await session.execute(text(_STATEMENT_CLOSINGS)):
         as_of = _iso_date(r.period_end)
-        if as_of is not None and r.balance is not None:
-            anchors.setdefault(r.account_id, {})[as_of] = Decimal(r.balance)
+        if as_of is None or r.balance is None or not before_feed(r.account_id, as_of):
+            continue
+        _, so_far = closings.get((r.account_id, r.import_batch_id), (as_of, Decimal(0)))
+        closings[(r.account_id, r.import_batch_id)] = (as_of, so_far + Decimal(r.balance))
+    anchors: dict[int, dict[date, Decimal]] = {}
+    for (account_id, _), (as_of, balance) in closings.items():
+        anchors.setdefault(account_id, {})[as_of] = balance
     # Feed and manual snapshots win over a statement closing on the same day.
-    for r in await session.execute(text(_SNAPSHOTS)):
-        anchors.setdefault(r.account_id, {})[r.as_of] = r.balance
+    for r in snapshots:
+        if r.source != "statement" or before_feed(r.account_id, r.as_of):
+            anchors.setdefault(r.account_id, {})[r.as_of] = r.balance
     # A home's or vehicle's purchase is a known value too, unless something was recorded that day.
     for r in await session.execute(text(_PURCHASES)):
         anchors.setdefault(r.account_id, {}).setdefault(r.purchase_date, r.purchase_price)
