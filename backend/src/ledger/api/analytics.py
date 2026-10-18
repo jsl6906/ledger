@@ -6,6 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ledger.analytics import reports
+from ledger.analytics.balances import monthly_balances
 from ledger.budgets.service import add_months
 from ledger.db.engine import get_session
 from ledger.jobs.worker import enqueue, notify_worker
@@ -37,6 +38,17 @@ async def cashflow(
     session: AsyncSession = Depends(get_session),
 ):
     return await reports.cashflow(session, *_range(start, end, months))
+
+
+@router.get("/analytics/balances")
+async def balances(
+    start: date | None = None,
+    end: date | None = None,
+    months: int = Query(12, ge=1, le=240),
+    session: AsyncSession = Depends(get_session),
+):
+    """Month-end balance per account, with net worth and checking + savings totals."""
+    return await monthly_balances(session, *_range(start, end, months))
 
 
 @router.get("/analytics/categories")

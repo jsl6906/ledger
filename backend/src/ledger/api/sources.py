@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger.analytics.balances import LIABILITIES
 from ledger.crypto import encrypt
 from ledger.db.engine import get_session
 from ledger.jobs.worker import enqueue, notify_worker
@@ -156,7 +157,6 @@ _LATEST_BALANCES = text(
     ORDER BY b.account_id, b.as_of DESC, b.created_at DESC
     """
 )
-LIABILITIES = ("credit_card", "loan", "mortgage")
 
 
 def _f(v):

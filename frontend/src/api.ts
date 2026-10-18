@@ -344,6 +344,17 @@ export interface CategoryRow {
   category_id: number | null; category: string; group_id: number | null; group: string; spent: number; income: number; count: number
 }
 export interface Trend { months: string[]; series: { id: number | null; name: string; total: number; values: number[] }[] }
+/** Month-end balances from /analytics/balances; liabilities are negative so accounts add up to net worth. */
+export interface BalanceSeries {
+  months: string[]; dates: string[]
+  accounts: {
+    id: number; name: string; account_type: string; liability: boolean; is_closed: boolean; is_hidden: boolean
+    values: (number | null)[]
+    /** Rebuilt from transactions before the account's first known balance. */
+    estimated: boolean[]
+  }[]
+  assets: number[]; liabilities: number[]; net_worth: number[]; cash: number[]
+}
 /** Filter for /analytics/contributors; in ids/exclude, 0 means Uncategorized. */
 export type ContribParams = {
   start: string; end: string; basis?: 'reports' | 'all' | 'budget'; kind?: 'expense' | 'income'; level?: 'group' | 'category'

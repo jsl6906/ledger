@@ -213,6 +213,88 @@ export function Legend({ items }: { items: { label: string; color: string; dashe
   )
 }
 
+export const ESTIMATED_FILL = 'color-mix(in srgb, var(--color-neutral-400) 18%, transparent)'
+const axisMoney = (v: number) => {
+  const a = Math.abs(v)
+  return (v < 0 ? '−' : '') + (a >= 1_000_000 ? `$${+(a / 1_000_000).toFixed(2)}M` : compact(a))
+}
+
+/** Month-end balances: stacked bands (positive values up from zero, negative down) with a total line. Months marked
+ * estimated are shaded and the total line is dashed through them. */
+export function BalanceChart({ months, bands, total, estimated, height = 260, tip }: {
+  months: string[]; bands: { name: string; color: string; values: (number | null)[] }[]; total: (number | null)[]
+  estimated?: boolean[]; height?: number; tip?: (i: number) => TipSpec | null
+}) {
+  const t = useTip()
+  const w = 640
+  const top = 8
+  const base = height - 20
+  const left = 44
+  const n = months.length
+  const up = Array<number>(n).fill(0)
+  const down = Array<number>(n).fill(0)
+  const shapes = bands.map((b) => {
+    const from: number[] = []
+    const to: number[] = []
+    for (let i = 0; i < n; i++) {
+      const v = b.values[i] ?? 0
+      const acc = v >= 0 ? up : down
+      from.push(acc[i])
+      acc[i] += v
+      to.push(acc[i])
+    }
+    return { ...b, from, to }
+  })
+  const vals = [...up, ...down, ...total.filter((v): v is number => v !== null)]
+  const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals), 4)
+  const lo = ticks[0]
+  const hi = ticks[ticks.length - 1]
+  const y = (v: number) => base - ((v - lo) / (hi - lo || 1)) * (base - top)
+  const slot = (w - left) / Math.max(1, n)
+  const cx = (i: number) => left + i * slot + slot / 2
+  const label = monthLabeler(months)
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} width="100%" style={{ display: 'block' }}>
+      {estimated?.map((e, i) => e && (
+        <rect key={`e${i}`} x={cx(i) - slot / 2} y={top} width={slot} height={base - top} fill={ESTIMATED_FILL} />
+      ))}
+      {ticks.map((v) => (
+        <g key={v}>
+          <line x1={left - 4} y1={y(v)} x2={w} y2={y(v)} stroke="var(--color-divider)" strokeDasharray={v === 0 ? undefined : '2 4'} />
+          <text x="0" y={y(v) + 3} fontSize="10" fill="var(--color-neutral-600)" fontFamily="Barlow">{axisMoney(v)}</text>
+        </g>
+      ))}
+      {shapes.map((s) => (
+        <polygon key={s.name} fill={s.color} fillOpacity={0.75} stroke="none" pointerEvents="none"
+          points={[...s.to.map((v, i) => `${cx(i)},${y(v)}`), ...s.from.map((v, i) => `${cx(i)},${y(v)}`).reverse()].join(' ')} />
+      ))}
+      {total.map((v, i) => {
+        const next = total[i + 1]
+        if (v === null || next === null || next === undefined) return null
+        return (
+          <line key={`t${i}`} x1={cx(i)} y1={y(v)} x2={cx(i + 1)} y2={y(next)} stroke="var(--color-text)" strokeWidth={n > 36 ? 1.5 : 2}
+            strokeDasharray={estimated?.[i] || estimated?.[i + 1] ? '4 3' : undefined} pointerEvents="none" />
+        )
+      })}
+      {n <= 36 && total.map((v, i) => v !== null && (
+        <circle key={`d${i}`} cx={cx(i)} cy={y(v)} r="2.5" fill="var(--color-text)" pointerEvents="none" />
+      ))}
+      {months.map((m, i) => {
+        const tick = label(i)
+        return (
+          <g key={m}>
+            <rect x={cx(i) - slot / 2} y={0} width={slot} height={base} fill="transparent"
+              {...(tip ? tipHandlers(t, () => tip(i)) : {})} />
+            {tick && (
+              <text x={cx(i)} y={height - 4} fontSize="10" textAnchor="middle" fill="var(--color-neutral-600)" fontFamily="Barlow">{tick}</text>
+            )}
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
 /** Several monthly series as lines. */
 export function TrendChart({ months, series, height = 220 }: {
   months: string[]; series: { name: string; values: number[] }[]; height?: number

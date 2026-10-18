@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
-import { get, type CashflowMonth, type CategoryRow, type Merchant, type Trend } from '../api'
+import { get, type BalanceSeries, type CashflowMonth, type CategoryRow, type Merchant, type Trend } from '../api'
 import { stackColor } from '../chartUtils'
-import { Legend, NET_DOWN, NET_UP, NetChart, SeriesHistory, StackedBars } from '../components/Charts'
+import { BalanceChart, ESTIMATED_FILL, Legend, NET_DOWN, NET_UP, NetChart, SeriesHistory, StackedBars } from '../components/Charts'
 import { Button, Card, ErrorNote, Seg, SortTh } from '../components/ui'
 import { iso, money, moneyRound, monthEnd, parseIso, shortDate } from '../format'
 import { useCategories, useGroups } from '../hooks'
@@ -15,6 +15,43 @@ type Range = '12m' | '24m' | 'ytd' | 'last_year' | 'all' | 'years'
 const RANGES: Range[] = ['12m', '24m', 'ytd', 'last_year', 'all', 'years']
 const LEVELS = ['group', 'category'] as const
 type Level = (typeof LEVELS)[number]
+
+// Net worth bands by account type; liabilities stack below zero.
+const NW_GROUPS: { name: string; types: string[]; color: string }[] = [
+  { name: 'Cash', types: ['checking', 'savings', 'cash'], color: '#416180' },
+  { name: 'Investments', types: ['investment', 'retirement'], color: '#94bce3' },
+  { name: 'Property & vehicles', types: ['property', 'vehicle'], color: '#c9a26b' },
+  { name: 'Other assets', types: ['other'], color: '#6f9a8d' },
+  { name: 'Credit cards', types: ['credit_card'], color: NET_DOWN },
+  { name: 'Loans', types: ['loan', 'mortgage'], color: '#b77b7b' },
+]
+const CASH_TYPES = ['checking', 'savings']
+const CASH_BANDS = 7
+const signedRound = (v: number) => (v > 0 ? '+' : '') + moneyRound(v)
+type BalAccount = BalanceSeries['accounts'][number]
+const sumAt = (accts: BalAccount[], i: number) => accts.reduce((a, x) => a + (x.values[i] ?? 0), 0)
+
+/** One balance chart's data for a set of accounts, starting at the first month any of them has a balance: bands, the
+ * total line (null where none has a balance), and which months lean materially on estimates. */
+function balanceView(months: string[], accts: BalAccount[], groups: { name: string; color: string; accts: BalAccount[] }[]) {
+  const from = Math.max(0, months.findIndex((_, i) => accts.some((a) => a.values[i] !== null)))
+  const cut = new Map(accts.map((a) => [a.id, { ...a, values: a.values.slice(from), estimated: a.estimated.slice(from) }]))
+  const rows = [...cut.values()]
+  const ms = months.slice(from)
+  const has = ms.map((_, i) => rows.some((a) => a.values[i] !== null))
+  const total = has.map((h, i) => (h ? sumAt(rows, i) : null))
+  const estAmount = ms.map((_, i) => rows.reduce((s, a) => s + (a.estimated[i] ? Math.abs(a.values[i] ?? 0) : 0), 0))
+  const gross = ms.map((_, i) => rows.reduce((s, a) => s + Math.abs(a.values[i] ?? 0), 0))
+  return {
+    months: ms, accts: rows, total, estAmount,
+    estimated: estAmount.map((e, i) => e > 0.05 * gross[i]),
+    first: has.indexOf(true),
+    last: has.lastIndexOf(true),
+    bands: groups.map((g) => ({ ...g, accts: g.accts.map((a) => cut.get(a.id)!) }))
+      .filter((b) => b.accts.some((a) => a.values.some((v) => v)))
+      .map((b) => ({ ...b, values: ms.map((_, i) => sumAt(b.accts, i)) })),
+  }
+}
 
 function rangeDates(r: Range, firstYear: number, fromYear: number, toYear: number): { start: string; end: string } {
   const now = new Date()
@@ -80,6 +117,45 @@ export function Reports() {
   })
   const openGroup = params.get('open')
   const setOpenGroup = (g: string | null) => set({ open: g }, { replace: true })
+
+  const bal = useQuery({ queryKey: ['analytics', 'balances', start, end], queryFn: () => get<BalanceSeries>('/analytics/balances', { start, end }) })
+  const balMonths = bal.data?.months ?? []
+  const allAccts = bal.data?.accounts ?? []
+  const nw = balanceView(balMonths, allAccts,
+    NW_GROUPS.map((g) => ({ ...g, accts: allAccts.filter((a) => g.types.includes(a.account_type)) })))
+  const cashAccts = allAccts.filter((a) => CASH_TYPES.includes(a.account_type))
+  const peak = (a: BalAccount) => Math.max(0, ...a.values.map((v) => Math.abs(v ?? 0)))
+  const byPeak = [...cashAccts].sort((a, b) => peak(b) - peak(a))
+  const shownCash = byPeak.length > CASH_BANDS ? byPeak.slice(0, CASH_BANDS - 1) : byPeak
+  const otherCash = byPeak.slice(shownCash.length)
+  const cash = balanceView(balMonths, cashAccts, [
+    ...shownCash.map((a, i) => ({ name: a.name, color: stackColor(a.name, i), accts: [a] })),
+    ...(otherCash.length ? [{ name: 'Other', color: stackColor('Other', 0), accts: otherCash }] : []),
+  ])
+  const change = (v: ReturnType<typeof balanceView>) => (v.first >= 0 ? (v.total[v.last] ?? 0) - (v.total[v.first] ?? 0) : 0)
+  const lateJoiners = nw.accts
+    .map((a) => ({ a, at: a.values.findIndex((v) => v !== null) }))
+    .filter(({ at }) => nw.first >= 0 && at > nw.first)
+    .sort((x, y) => Math.abs(y.a.values[y.at] ?? 0) - Math.abs(x.a.values[x.at] ?? 0))
+  const balTip = (v: ReturnType<typeof balanceView>, label: string, perAccount: boolean) => (i: number): TipSpec | null => {
+    const total = v.total[i]
+    if (total === null) return null
+    const prev = v.total[i - 1]
+    const parts = perAccount
+      ? v.bands.flatMap((b) => b.accts).filter((a) => a.values[i])
+        .sort((a, b) => (b.values[i] ?? 0) - (a.values[i] ?? 0))
+        .map((a) => `${a.name}: ${money(a.values[i])}${a.estimated[i] ? ' (est.)' : ''}`)
+      : v.bands.filter((b) => b.values[i]).map((b) => `${b.name}: ${money(b.values[i])}`)
+    const est = v.accts.filter((a) => a.estimated[i]).map((a) => a.name)
+    return {
+      title: `${monthName(v.months[i])} · ${label} ${money(total)}`,
+      lines: [
+        ...(prev !== null && prev !== undefined ? [`${money(total - prev, true)} vs prior month`] : []),
+        ...parts,
+        ...(est.length && !perAccount ? [`Estimated: ${est.join(', ')} (${money(v.estAmount[i])})`] : []),
+      ],
+    }
+  }
 
   const totals = (flow.data ?? []).reduce((a, m) => ({ inc: a.inc + m.income, exp: a.exp + m.expenses }), { inc: 0, exp: 0 })
   const n = Math.max(1, flow.data?.length ?? 1)
@@ -171,7 +247,7 @@ export function Reports() {
           <a className="btn btn-secondary" href={exportUrl}>Export CSV</a>
         </div>
       </header>
-      <ErrorNote error={span.error || flow.error || cats.error || hist.error || merchants.error || incStack.error || expStack.error} />
+      <ErrorNote error={span.error || flow.error || cats.error || hist.error || merchants.error || incStack.error || expStack.error || bal.error} />
 
       {([
         { key: 'inc', kind: 'income', kicker: 'Income', total: totals.inc, q: incStack, lvl: incLevel, dflt: 'category' },
@@ -228,6 +304,37 @@ export function Reports() {
           </div>
         )}
       </Card>
+
+      {([
+        { key: 'nw', kicker: 'Net worth', label: 'net worth', v: nw, perAccount: false, total: 'Net worth' },
+        { key: 'cash', kicker: 'Checking + savings', label: 'checking + savings', v: cash, perAccount: true, total: 'Total' },
+      ] as const).map((c) => (
+        <Card key={c.key}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <div>
+              <div className="card-kicker">{c.kicker}</div>
+              <div className="card-title">
+                {c.v.last >= 0
+                  ? `${moneyRound(c.v.total[c.v.last] ?? 0)} · ${signedRound(change(c.v))} since ${monthName(c.v.months[c.v.first])}`
+                  : bal.isPending ? 'Loading…' : 'No balances in this period'}
+              </div>
+            </div>
+            <Legend items={[
+              ...c.v.bands.map((b) => ({ label: b.name, color: b.color })),
+              { label: c.total, color: 'var(--color-text)' },
+              ...(c.v.estimated.some(Boolean) ? [{ label: 'Estimated', color: ESTIMATED_FILL }] : []),
+            ]} />
+          </div>
+          <BalanceChart months={c.v.months} bands={c.v.bands} total={c.v.total} estimated={c.v.estimated}
+            tip={balTip(c.v, c.label, c.perAccount)} />
+          <div className="card-meta">
+            Month-end balances{c.key === 'nw' ? '; debts shown below zero, homes and vehicles valued along a straight line from their purchase price until their first valuation' : ''}.
+            {c.v.estimated.some(Boolean) && ' Shaded months lean on balances rebuilt from transactions, working back from the first known balance.'}
+            {c.key === 'nw' && lateJoiners.length > 0 && ` Balance history starts later for ${lateJoiners.slice(0, 4)
+              .map(({ a, at }) => `${a.name} (${monthName(c.v.months[at])})`).join(', ')}${lateJoiners.length > 4 ? ` and ${lateJoiners.length - 4} more` : ''}.`}
+          </div>
+        </Card>
+      ))}
 
       <div className="grid-2" style={{ alignItems: 'start' }}>
         <Card style={{ gap: 'var(--space-2)' }}>
