@@ -328,7 +328,7 @@ export function Reports() {
           <BalanceChart months={c.v.months} bands={c.v.bands} total={c.v.total} estimated={c.v.estimated}
             tip={balTip(c.v, c.label, c.perAccount)} />
           <div className="card-meta">
-            Month-end balances{c.key === 'nw' ? '; debts shown below zero, homes and vehicles valued along a straight line from their purchase price until their first valuation' : ''}.
+            Month-end balances{c.key === 'nw' ? '; debts shown below zero. Homes, vehicles and loans follow a straight line between known values, including purchase prices' : ''}.
             {c.v.estimated.some(Boolean) && ' Shaded months lean on balances rebuilt from transactions, working back from the first known balance.'}
             {c.key === 'nw' && lateJoiners.length > 0 && ` Balance history starts later for ${lateJoiners.slice(0, 4)
               .map(({ a, at }) => `${a.name} (${monthName(c.v.months[at])})`).join(', ')}${lateJoiners.length > 4 ? ` and ${lateJoiners.length - 4} more` : ''}.`}

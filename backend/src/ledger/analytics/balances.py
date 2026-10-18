@@ -1,12 +1,12 @@
 """Month-end balances per account, for the net worth and checking + savings charts.
 
-Each account's balance at a month end comes from its latest snapshot on or before that day (account_balance rows; for
-checking and savings also the closing balances of trusted statements). Checking and savings balances also move with the
-ledger: after a snapshot by the transactions since, and before the account's first snapshot by working back from it
-through the transactions in between (those points are marked estimated). Homes and vehicles with a purchase date and
-price are valued along a straight line from the purchase to their first recorded value. Other accounts
-only carry snapshots forward, so they join the totals at their first snapshot. Closed accounts drop out after their last
-balance or transaction.
+Each account's balance at a month end comes from its latest snapshot on or before that day (account_balance rows, and
+the closing balances of statements for checking, savings, loans and mortgages). Checking and savings balances also move
+with the ledger: after a snapshot by the transactions since, and before the account's first snapshot by working back
+from it through the transactions in between (those points are marked estimated). Homes, vehicles, loans and mortgages
+move along a straight line between known values, a home's or vehicle's purchase price counting as one. Other accounts
+only carry snapshots forward. Every account joins the totals at its first known value; closed accounts drop out after
+their last balance or transaction.
 """
 
 from bisect import bisect_right
@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 LIABILITIES = ("credit_card", "loan", "mortgage")
 CASH = ("checking", "savings")
+# Values that drift steadily between valuations or statements rather than jumping with each transaction.
+INTERPOLATED = ("property", "vehicle", "loan", "mortgage")
 
 
 def month_points(start: date, end: date, today: date) -> list[date]:
@@ -36,9 +38,11 @@ def account_series(
     anchors: list[tuple[date, Decimal]],
     flows: list[tuple[date, Decimal]] | None = None,
     until: date | None = None,
+    interpolate: bool = False,
 ) -> list[tuple[Decimal | None, bool]]:
     """(balance, estimated) at each point. `anchors`/`flows` are sorted by date, one entry per date; `flows` (net
-    transaction amount per day) is given for accounts whose balance follows the ledger; `until` ends a closed account."""
+    transaction amount per day) is given for accounts whose balance follows the ledger; `until` ends a closed account;
+    `interpolate` draws a straight line between anchors instead of holding each until the next."""
     if not anchors:
         return [(None, False)] * len(points)
     a_dates = [d for d, _ in anchors]
@@ -59,7 +63,10 @@ def account_series(
             out.append((None, False))
             continue
         i = bisect_right(a_dates, p)
-        if i:
+        if i and interpolate and i < len(anchors):
+            (d0, v0), (d1, v1) = anchors[i - 1], anchors[i]
+            out.append((v0 + (v1 - v0) * Decimal((p - d0).days) / Decimal((d1 - d0).days), False))
+        elif i:
             as_of, bal = anchors[i - 1]
             out.append((bal + through(p) - through(as_of) if flows else bal, False))
         elif flows and f_dates[0] <= p:
@@ -70,24 +77,6 @@ def account_series(
     return out
 
 
-def from_purchase(
-    points: list[date],
-    series: list[tuple[Decimal | None, bool]],
-    purchase: tuple[date, Decimal],
-    first: tuple[date, Decimal],
-) -> list[tuple[Decimal | None, bool]]:
-    """Value a home or vehicle between its purchase and first recorded value along a straight line from the purchase
-    price; modeled like depreciation valuations, so not marked estimated."""
-    (bought, price), (as_of, value) = purchase, first
-    if bought >= as_of:
-        return series
-    span = Decimal((as_of - bought).days)
-    return [
-        (price + (value - price) * Decimal((p - bought).days) / span, False) if v is None and bought <= p < as_of else (v, e)
-        for p, (v, e) in zip(points, series, strict=True)
-    ]
-
-
 _ACCOUNTS = """--sql
     SELECT id, name, account_type, is_closed, is_hidden FROM account ORDER BY name
 """
@@ -95,10 +84,11 @@ _SNAPSHOTS = """--sql
     SELECT DISTINCT ON (account_id, as_of) account_id, as_of, balance FROM account_balance
     ORDER BY account_id, as_of, created_at DESC
 """
-# Closing balances of committed statements whose rows add up from the opening balance, dated by the statement's own
-# period end. Only for checking and savings: other accounts' statements print balances with either sign.
+# Statement closing balances, dated by the period end printed on the statement. Checking and savings statements count
+# only when their rows add up from the opening balance; loan and mortgage rows never do (interest), so theirs count
+# unless the statement was found unreliable. Credit card and investment statements are left out.
 _STATEMENT_CLOSINGS = """--sql
-    SELECT sc.account_id, sc.period_end AS as_of,
+    SELECT sc.account_id, b.doc_meta->>'period_end' AS period_end,
            CASE WHEN sc.account_ref = '' THEN b.doc_meta->>'closing_balance'
                 ELSE (SELECT x->>'closing_balance'
                       FROM jsonb_array_elements(coalesce(b.doc_meta->'accounts', '[]'::jsonb)) x
@@ -107,8 +97,9 @@ _STATEMENT_CLOSINGS = """--sql
     FROM statement_check sc
     JOIN import_batch b ON b.id = sc.import_batch_id
     JOIN account a ON a.id = sc.account_id
-    WHERE sc.trusted AND b.status = 'committed' AND sc.period_end IS NOT NULL
-      AND sc.detail->>'period_source' = 'statement' AND a.account_type IN ('checking', 'savings')
+    WHERE b.status = 'committed'
+      AND ((a.account_type IN ('checking', 'savings') AND sc.trusted)
+           OR (a.account_type IN ('loan', 'mortgage') AND sc.trusted IS NOT FALSE))
 """
 _FLOWS = """--sql
     SELECT account_id, coalesce(posted_date, txn_date) AS d, sum(amount) AS amount FROM "transaction"
@@ -121,6 +112,14 @@ _PURCHASES = """--sql
 """
 
 
+def _iso_date(s: str | None) -> date | None:
+    """A date read off a document, or None when it's missing or malformed."""
+    try:
+        return date.fromisoformat(s) if s else None
+    except ValueError:
+        return None
+
+
 async def monthly_balances(session: AsyncSession, start: date, end: date, today: date | None = None) -> dict:
     """Per-account month-end balances (liabilities negative, so they add up to net worth) with monthly totals."""
     today = today or date.today()
@@ -128,32 +127,34 @@ async def monthly_balances(session: AsyncSession, start: date, end: date, today:
     accounts = {r.id: r for r in await session.execute(text(_ACCOUNTS))}
     anchors: dict[int, dict[date, Decimal]] = {}
     for r in await session.execute(text(_STATEMENT_CLOSINGS)):
-        if r.balance is not None:
-            anchors.setdefault(r.account_id, {})[r.as_of] = Decimal(r.balance)
+        as_of = _iso_date(r.period_end)
+        if as_of is not None and r.balance is not None:
+            anchors.setdefault(r.account_id, {})[as_of] = Decimal(r.balance)
     # Feed and manual snapshots win over a statement closing on the same day.
     for r in await session.execute(text(_SNAPSHOTS)):
         anchors.setdefault(r.account_id, {})[r.as_of] = r.balance
+    # A home's or vehicle's purchase is a known value too, unless something was recorded that day.
+    for r in await session.execute(text(_PURCHASES)):
+        anchors.setdefault(r.account_id, {}).setdefault(r.purchase_date, r.purchase_price)
     cash_ids = [i for i in anchors if accounts[i].account_type in CASH]
     flows: dict[int, list[tuple[date, Decimal]]] = {}
     if cash_ids:
         for r in await session.execute(text(_FLOWS), {"ids": cash_ids}):
             flows.setdefault(r.account_id, []).append((r.d, r.amount))
-    purchases = {r.account_id: (r.purchase_date, r.purchase_price) for r in await session.execute(text(_PURCHASES))}
 
     rows = []
     for aid, by_date in anchors.items():
         a = accounts[aid]
-        series = sorted(by_date.items())
+        liability = a.account_type in LIABILITIES
+        # Sources disagree on the sign of what's owed; work in amounts owed so lines between them stay straight.
+        series = sorted((d, abs(v) if liability else v) for d, v in by_date.items())
         own = flows.get(aid) if a.account_type in CASH else None
         until = None
         if a.is_closed:
             until = max(series[-1][0], own[-1][0]) if own else series[-1][0]
-        vals = account_series(points, series, own, until)
-        if aid in purchases:
-            vals = from_purchase(points, vals, purchases[aid], series[0])
+        vals = account_series(points, series, own, until, a.account_type in INTERPOLATED)
         if all(v is None for v, _ in vals):
             continue
-        liability = a.account_type in LIABILITIES
         rows.append(
             {
                 "id": aid,
@@ -162,7 +163,7 @@ async def monthly_balances(session: AsyncSession, start: date, end: date, today:
                 "liability": liability,
                 "is_closed": a.is_closed,
                 "is_hidden": a.is_hidden,
-                "values": [None if v is None else float(-abs(v) if liability else v) for v, _ in vals],
+                "values": [None if v is None else round(float(-abs(v) if liability else v), 2) for v, _ in vals],
                 "estimated": [e for _, e in vals],
             }
         )

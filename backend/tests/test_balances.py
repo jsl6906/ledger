@@ -1,7 +1,9 @@
 from datetime import date
 from decimal import Decimal as D
 
-from ledger.analytics.balances import account_series, from_purchase, month_points
+import pytest
+
+from ledger.analytics.balances import account_series, month_points
 from ledger.db.engine import get_sessionmaker
 from ledger.models import AccountBalance, ImportBatch, StatementCheck
 
@@ -38,18 +40,15 @@ def test_account_series_follows_ledger_around_snapshot():
     assert account_series(points, []) == [(None, False)] * 5
 
 
-def test_from_purchase_interpolates_to_first_value():
+def test_account_series_interpolates_between_anchors():
     points = [date(2019, 12, 31), date(2020, 1, 31), date(2020, 2, 29), date(2020, 3, 31)]
-    series = [(None, False), (None, False), (None, False), (D("20000"), False)]
-    first = (date(2020, 3, 1), D("20000"))
-    assert from_purchase(points, series, (date(2020, 1, 1), D("30000")), first) == [
-        (None, False),  # before the purchase
+    anchors = [(date(2020, 1, 1), D("30000")), (date(2020, 3, 1), D("20000"))]
+    assert account_series(points, anchors, interpolate=True) == [
+        (None, False),  # before the first known value
         (D("30000") - D("10000") * 30 / 60, False),
         (D("30000") - D("10000") * 59 / 60, False),
-        (D("20000"), False),
+        (D("20000"), False),  # held after the last
     ]
-    # A purchase recorded after the first value changes nothing.
-    assert from_purchase(points, series, (date(2020, 6, 1), D("1")), first) == series
 
 
 async def test_monthly_balances_endpoint(client):
@@ -68,31 +67,67 @@ async def test_monthly_balances_endpoint(client):
     sav = await account("BL Savings", "savings")
     card = await account("BL Card", "credit_card")
     brk = await account("BL Brokerage", "investment")
+    car = await account("BL Car Loan", "loan")
     for d, amt in (("2019-01-05", "1000.00"), ("2019-02-10", "-200.00"), ("2019-03-03", "-50.00")):
         await txn(chk, d, amt)
     await txn(sav, "2019-02-15", "25.00")
 
+    # A home sold in March, with its mortgage paid off at the sale; both closed.
+    loan = await account("BL Old Mortgage", "mortgage")
+    r = await client.post(
+        "/api/assets",
+        json={
+            "name": "BL Old Home",
+            "account_type": "property",
+            "purchase_date": "2019-01-01",
+            "purchase_price": "300000",
+            "loan_account_id": loan,
+        },
+    )
+    assert r.status_code == 201, r.text
+    home = r.json()["account_id"]
+    r = await client.post(f"/api/assets/{home}/valuations", json={"value": "330000", "as_of": "2019-03-01"})
+    assert r.status_code == 200, r.text
+    for acct, name, kind in ((home, "BL Old Home", "property"), (loan, "BL Old Mortgage", "mortgage")):
+        r = await client.put(f"/api/accounts/{acct}", json={"name": name, "account_type": kind, "is_closed": True})
+        assert r.status_code == 200, r.text
+
     async with get_sessionmaker()() as s:
         snapshots = ((chk, date(2019, 3, 15), "1750"), (card, date(2019, 2, 20), "300"), (brk, date(2019, 3, 31), "10000"))
+        snapshots += ((loan, date(2019, 1, 1), "-240000"), (loan, date(2019, 3, 1), "-230000"))
         for acct, d, bal in snapshots:
             s.add(AccountBalance(account_id=acct, as_of=d, balance=D(bal), source="manual"))
-        for trusted, end, closing in ((True, date(2019, 1, 31), 5000.0), (False, date(2019, 2, 28), 9999.0)):
+        closings = [
+            (sav, "4321", True, date(2019, 1, 31), 5000.0),
+            (sav, "4321", False, date(2019, 2, 28), 9999.0),
+            (sav, "4321", True, "2019-02-30", 7777.0),  # unreadable period end
+            # Loan statements never reconcile (interest), so unverified ones count; signs vary by statement.
+            (car, "8290", None, date(2019, 1, 31), 12000.0),
+            (car, "8290", False, date(2019, 2, 28), 99999.0),
+            (car, "8290", None, date(2019, 3, 31), -11000.0),
+        ]
+        for acct, ref, trusted, end, closing in closings:
+            printed = end if isinstance(end, str) else end.isoformat()
             batch = ImportBatch(
                 source_type="document",
                 status="committed",
-                doc_meta={"accounts": [{"ref": "4321", "closing_balance": closing}], "closing_balance": closing},
+                doc_meta={
+                    "period_end": printed,
+                    "accounts": [{"ref": ref, "closing_balance": closing}],
+                    "closing_balance": closing,
+                },
             )
             s.add(batch)
             await s.flush()
             s.add(
                 StatementCheck(
                     import_batch_id=batch.id,
-                    account_ref="4321",
-                    account_id=sav,
-                    period_end=end,
-                    status="ok",
+                    account_ref=ref,
+                    account_id=acct,
+                    period_end=date(2019, 2, 28) if isinstance(end, str) else end,
+                    status="ok" if trusted else "unverified",
                     trusted=trusted,
-                    detail={"period_source": "statement"},
+                    detail={"period_source": "rows"},
                 )
             )
         await s.commit()
@@ -108,6 +143,10 @@ async def test_monthly_balances_endpoint(client):
     assert rows[sav]["values"] == [None, 5000.0, 5025.0, 5025.0, 5025.0]
     assert rows[card]["values"] == [None, None, -300.0, -300.0, -300.0] and rows[card]["liability"]
     assert rows[brk]["values"] == [None, None, None, 10000.0, 10000.0]
+    # Straight lines from purchase to sale (59 days), gone once sold.
+    assert rows[home]["values"] == pytest.approx([None, 300000 + 30000 * 30 / 59, 300000 + 30000 * 58 / 59, None, None])
+    assert rows[loan]["values"] == pytest.approx([None, -240000 + 10000 * 30 / 59, -240000 + 10000 * 58 / 59, None, None])
+    assert rows[car]["values"] == pytest.approx([None, -12000, -(12000 - 1000 * 28 / 59), -11000, -11000], abs=0.01)
 
     def total(pick):
         return [round(sum(a["values"][i] or 0 for a in out["accounts"] if pick(a)), 2) for i in range(5)]
