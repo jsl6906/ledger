@@ -1,4 +1,7 @@
-"""Budget evaluation with spreading: a transaction may count across N months (per-transaction override or rule)."""
+"""Budget evaluation with spreading: a transaction may count across N months (per-transaction override or rule).
+
+Spreads whose length divides 12 cover the calendar block containing the transaction (quarter, half-year, year...).
+"""
 
 import statistics
 from calendar import monthrange
@@ -73,15 +76,25 @@ _SPREAD_ACTUALS = text(
           AND t.category_id IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM account xa WHERE xa.id = t.account_id AND xa.is_hidden)
           AND t.txn_date >= CAST(:start AS date) - interval '60 months'
-          AND t.txn_date <= CAST(:end AS date)
+          AND t.txn_date < date_trunc('year', CAST(:end AS date)) + interval '1 year'
+    ),
+    -- Spreads that tile the year (2, 3, 4, 6, 12 months) cover the calendar block holding the charge,
+    -- e.g. a 12-month spread covers its calendar year; other lengths run forward from the charge's month.
+    aligned AS (
+        SELECT tx.category_id, tx.amount, tx.n,
+               CASE WHEN 12 % tx.n = 0
+                    THEN make_date(CAST(extract(year FROM tx.m0) AS int),
+                                   (CAST(extract(month FROM tx.m0) AS int) - 1) / tx.n * tx.n + 1, 1)
+                    ELSE tx.m0 END AS s0
+        FROM tx
     )
-    SELECT tx.category_id,
-           sum(tx.amount / tx.n) AS net,
-           sum(CASE WHEN tx.n > 1 THEN tx.amount / tx.n ELSE 0 END) AS spread_part
-    FROM tx
-    CROSS JOIN LATERAL generate_series(0, tx.n - 1) AS g(i)
-    WHERE CAST(tx.m0 + make_interval(months => g.i) AS date) BETWEEN CAST(:start AS date) AND CAST(:end AS date)
-    GROUP BY tx.category_id
+    SELECT a.category_id,
+           sum(a.amount / a.n) AS net,
+           sum(CASE WHEN a.n > 1 THEN a.amount / a.n ELSE 0 END) AS spread_part
+    FROM aligned a
+    CROSS JOIN LATERAL generate_series(0, a.n - 1) AS g(i)
+    WHERE CAST(a.s0 + make_interval(months => g.i) AS date) BETWEEN CAST(:start AS date) AND CAST(:end AS date)
+    GROUP BY a.category_id
     """
 )
 

@@ -47,7 +47,8 @@ async def test_budget_status_with_spreading(client, cats):
     q = (await client.get("/api/budgets/status", params={"period": "quarter", "on": "2025-02-01"})).json()
     rows = {r["name"]: r for r in q["rows"]}
     assert q["period"]["label"] == "Q1 2025"
-    assert rows["TB Groceries"]["budget"] == 1200 and rows["TB Groceries"]["actual"] == 450
+    # The 3-month bulk buy spreads over its calendar quarter, so all 600 lands in Q1
+    assert rows["TB Groceries"]["budget"] == 1200 and rows["TB Groceries"]["actual"] == 850
     assert rows["TB Insurance"]["actual"] == 300
 
     # Mid-period, spread shares count as already-known spending rather than being extrapolated by pace
@@ -59,10 +60,10 @@ async def test_budget_status_with_spreading(client, cats):
     ins = {r["name"]: r for r in mid["rows"]}["TB Insurance"]
     assert ins["projected"] == 100 and ins["status"] == "ok"
 
-    # Next month still carries the spread shares
+    # The annual spread carries into the next quarter; the quarterly one stops at the quarter's end
     apr = (await client.get("/api/budgets/status", params={"period": "month", "on": "2025-04-01"})).json()
     rows = {r["name"]: r for r in apr["rows"]}
-    assert rows["TB Groceries"]["actual"] == 200 and rows["TB Insurance"]["actual"] == 100
+    assert rows["TB Groceries"]["actual"] == 0 and rows["TB Insurance"]["actual"] == 100
 
     # Group budget covers both categories; per-category budgets removed so totals don't double count
     await client.delete(f"/api/budgets/{b1['id']}")
@@ -106,9 +107,47 @@ async def test_budget_suggestions(client, cats):
     async with get_sessionmaker()() as session:
         out = await suggest_budgets(session, date(2025, 4, 15), months=3)
     by = {r["name"]: r for r in out}
-    # Groceries now has no category budget (deleted above); insurance still does and is excluded
-    assert by["TB Groceries"]["monthly_average"] == Decimal("150.00") and by["TB Groceries"]["suggested"] == 150
+    # Groceries now has no category budget (deleted above); insurance still does and is excluded.
+    # Jan-Mar: 250 in March plus the whole 600 quarterly spread
+    assert by["TB Groceries"]["monthly_average"] == Decimal("283.33") and by["TB Groceries"]["suggested"] == 290
     assert "TB Insurance" not in by
+
+
+async def test_spreads_align_to_calendar_blocks(client):
+    from ledger.budgets.service import actuals
+    from ledger.db.engine import get_sessionmaker
+
+    g = (await client.post("/api/category-groups", json={"name": "TB Spread Group", "type": "expense"})).json()
+    tax = (await client.post("/api/categories", json={"name": "TB Car Tax", "group_id": g["id"]})).json()
+    pol = (await client.post("/api/categories", json={"name": "TB Policy", "group_id": g["id"]})).json()
+    for d, amt, cat, n in (
+        ("2025-10-15", "-1200.00", tax, 12),
+        ("2026-10-07", "-600.00", tax, 12),
+        ("2025-08-01", "-600.00", pol, 6),
+        ("2025-08-20", "-500.00", pol, 5),
+    ):
+        body = {
+            "txn_date": d,
+            "description": "TB SPREAD",
+            "amount": amt,
+            "category_id": cat["id"],
+            "budget_spread_months": n,
+        }
+        assert (await client.post("/api/transactions", json=body)).status_code == 201
+
+    async with get_sessionmaker()() as session:
+
+        async def net(cat: dict, start: str, end: str) -> Decimal:
+            act = await actuals(session, date.fromisoformat(start), date.fromisoformat(end))
+            return act.get(cat["id"], (Decimal(0), Decimal(0)))[0]
+
+        # Annual bills cover their own calendar year, so a year shows exactly that year's bill
+        assert await net(tax, "2026-01-01", "2026-12-31") == -600
+        assert await net(tax, "2025-01-01", "2025-01-31") == -100
+        # 6 months: Jul-Dec half-year; 5 months doesn't tile the year so it runs Aug-Dec from the charge
+        assert await net(pol, "2025-07-01", "2025-07-31") == -100
+        assert await net(pol, "2025-12-01", "2025-12-31") == -200
+        assert await net(pol, "2026-01-01", "2026-01-31") == 0
 
 
 async def test_recurring_bill_projection(client):
