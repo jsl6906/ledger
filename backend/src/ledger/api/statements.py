@@ -254,12 +254,18 @@ async def series_history(series_id: int, session: AsyncSession = Depends(get_ses
         usage = _primary_usage(st.usage, sr.primary_metric)
         txns = links.get(st.id, [])
         amount = st.amount_due if st.amount_due is not None else (abs(sum(t.amount for t in txns)) if txns else None)
-        cpu = (amount / usage.value).quantize(Decimal("0.0001")) if usage and amount and usage.value else None
+        # Net pay per dollar of gross pay isn't a unit cost.
+        cpu = (
+            (amount / usage.value).quantize(Decimal("0.0001"))
+            if usage and amount and usage.value and st.document_type != "paystub"
+            else None
+        )
         out.append(
             SeriesPoint(
                 statement_id=st.id,
                 filename=st.attachment.filename,
                 attachment_id=st.attachment_id,
+                document_type=st.document_type,
                 period_start=st.period_start,
                 period_end=st.period_end,
                 statement_date=st.statement_date,

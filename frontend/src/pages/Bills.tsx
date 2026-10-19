@@ -17,6 +17,7 @@ const periodLabel = (s: { period_start: string | null; period_end: string | null
 const monthOf = (d: string | null) => (d ? `${MONTHS[Number(d.slice(5, 7)) - 1]} ${d.slice(2, 4)}` : '')
 const fmtUsage = (v: string | number | null, unit: string | null) =>
   v === null ? '—'
+    : unit?.toUpperCase() === 'USD' ? money(v)
     : `${Number(v).toLocaleString(undefined, { maximumFractionDigits: Math.abs(Number(v)) >= 100 ? 0 : 2 })} ${unit ?? ''}`.trim()
 const asCandidate = (t: Transaction): LinkCandidate => ({
   transaction_id: t.id, date: t.txn_date, amount: t.amount, description: t.description, score: 1, reason: 'Chosen by you',
@@ -51,7 +52,7 @@ export function Bills() {
       <header className="page-header">
         <div>
           <h2>Bills &amp; statements</h2>
-          <div className="text-muted subtitle">Documents attached to transactions, with usage extracted per period</div>
+          <div className="text-muted subtitle">Bills, receipts and paystubs attached to transactions, with usage or pay extracted per period</div>
         </div>
         <input ref={fileInput} type="file" hidden accept=".pdf,.png,.jpg,.jpeg,.webp,.heic,.gif,.tif,.tiff"
           onChange={(e) => { const f = e.target.files?.[0]; if (f) send.mutate(f); e.target.value = '' }} />
@@ -110,9 +111,11 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
   const [links, setLinks] = useState<number[]>(sug.transaction_ids ?? [])
   const [picked, setPicked] = useState<LinkCandidate[]>([])
   const [fields, setFields] = useState({
-    vendor: st.vendor ?? '', period_start: st.period_start ?? '', period_end: st.period_end ?? '',
-    due_date: st.due_date ?? '', amount_due: st.amount_due ?? '',
+    vendor: st.vendor ?? '', statement_date: st.statement_date ?? '', period_start: st.period_start ?? '',
+    period_end: st.period_end ?? '', due_date: st.due_date ?? '', amount_due: st.amount_due ?? '',
   })
+  const paystub = st.document_type === 'paystub'
+  const payment = paystub ? 'deposit' : 'payment'
   const [usage, setUsage] = useState<Usage[]>(st.usage)
   const done = () => {
     qc.invalidateQueries({ queryKey: ['statements'] })
@@ -123,7 +126,8 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
     mutationFn: () => post<Statement>(`/statements/${st.id}/approve`, {
       one_off: oneOff, series_id: oneOff ? null : seriesId,
       new_series_name: oneOff || seriesId ? null : newName, new_series_category_id: oneOff || seriesId ? null : newCat,
-      transaction_ids: links, vendor: fields.vendor || null, period_start: fields.period_start || null,
+      transaction_ids: links, vendor: fields.vendor || null, statement_date: fields.statement_date || null,
+      period_start: fields.period_start || null,
       period_end: fields.period_end || null, due_date: fields.due_date || null, amount_due: fields.amount_due || null,
       usage: usage.map((u) => ({ metric: u.metric, value: u.value, unit: u.unit, is_primary: u.is_primary })),
     }),
@@ -178,17 +182,17 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: 'var(--space-3)', fontSize: 13 }}>
           <div><div className="text-muted" style={{ fontSize: 11 }}>Link to</div>
             <div style={{ fontWeight: 500 }}>
-              {links.length === 0 ? 'No matching payment yet' : candidates.filter((c) => links.includes(c.transaction_id))
+              {links.length === 0 ? `No matching ${payment} yet` : candidates.filter((c) => links.includes(c.transaction_id))
                 .map(candidateLabel).join('; ')}
             </div>
-            {links.length === 0 && <div className="small text-muted">Matched automatically once the payment syncs.</div>}</div>
+            {links.length === 0 && <div className="small text-muted">Matched automatically once the {payment} syncs.</div>}</div>
           <div><div className="text-muted" style={{ fontSize: 11 }}>Series</div>
             <div style={{ fontWeight: 500 }}>
               {oneOff ? 'One-off receipt (no bill)' : seriesId ? series.find((s) => s.id === seriesId)?.name : `${newName} (new)`}
             </div></div>
-          <div><div className="text-muted" style={{ fontSize: 11 }}>Period</div>
-            <div style={{ fontWeight: 500 }}>{periodLabel(st)}</div></div>
-          <div><div className="text-muted" style={{ fontSize: 11 }}>Amount · usage</div>
+          <div><div className="text-muted" style={{ fontSize: 11 }}>{paystub ? 'Pay period · paid' : 'Period'}</div>
+            <div style={{ fontWeight: 500 }}>{periodLabel(st)}{paystub && st.statement_date && st.period_start && st.period_end ? ` · ${shortDate(st.statement_date)}` : ''}</div></div>
+          <div><div className="text-muted" style={{ fontSize: 11 }}>{paystub ? 'Net pay · gross' : 'Amount · usage'}</div>
             <div style={{ fontWeight: 500 }}>{money(st.amount_due)}{primary ? ` · ${fmtUsage(primary.value, primary.unit)}` : ''}</div></div>
         </div>
       ) : (
@@ -208,15 +212,17 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
             {!seriesId && !oneOff && <Field label="Category for payments"><CategorySelect value={newCat} onChange={setNewCat} emptyLabel="Leave as is" /></Field>}
           </div>
           <div className="grid-form">
-            <Field label="Vendor"><input className="input" value={fields.vendor} onChange={(e) => setFields({ ...fields, vendor: e.target.value })} /></Field>
+            <Field label={paystub ? 'Employer' : 'Vendor'}><input className="input" value={fields.vendor} onChange={(e) => setFields({ ...fields, vendor: e.target.value })} /></Field>
             <Field label="Period start"><input className="input" type="date" value={fields.period_start} onChange={(e) => setFields({ ...fields, period_start: e.target.value })} /></Field>
             <Field label="Period end"><input className="input" type="date" value={fields.period_end} onChange={(e) => setFields({ ...fields, period_end: e.target.value })} /></Field>
-            <Field label="Due"><input className="input" type="date" value={fields.due_date} onChange={(e) => setFields({ ...fields, due_date: e.target.value })} /></Field>
-            <Field label="Amount"><input className="input" type="number" step="0.01" value={fields.amount_due} onChange={(e) => setFields({ ...fields, amount_due: e.target.value })} /></Field>
+            {paystub
+              ? <Field label="Pay date"><input className="input" type="date" value={fields.statement_date} onChange={(e) => setFields({ ...fields, statement_date: e.target.value })} /></Field>
+              : <Field label="Due"><input className="input" type="date" value={fields.due_date} onChange={(e) => setFields({ ...fields, due_date: e.target.value })} /></Field>}
+            <Field label={paystub ? 'Net pay' : 'Amount'}><input className="input" type="number" step="0.01" value={fields.amount_due} onChange={(e) => setFields({ ...fields, amount_due: e.target.value })} /></Field>
           </div>
           {usage.length > 0 && (
             <table className="table" style={{ fontSize: 13 }}>
-              <thead><tr><th>Usage metric</th><th>Value</th><th>Unit</th><th>Primary</th></tr></thead>
+              <thead><tr><th>{paystub ? 'Pay item' : 'Usage metric'}</th><th>Value</th><th>Unit</th><th>Primary</th></tr></thead>
               <tbody>
                 {usage.map((u, i) => (
                   <tr key={i}>
@@ -233,8 +239,10 @@ function Suggestion({ st, series }: { st: Statement; series: Series[] }) {
             </table>
           )}
           <div className="stack">
-            <div className="card-kicker">Link to payment</div>
-            {candidates.length === 0 && <div className="small text-muted">No payment of a matching amount near the due date yet. Search below, or leave it to be matched when the payment syncs.</div>}
+            <div className="card-kicker">Link to {paystub ? 'deposit(s)' : 'payment'}</div>
+            {candidates.length === 0 && <div className="small text-muted">{paystub
+              ? 'No deposit of a matching amount near the pay date yet. Search below, or leave it to be matched when the deposit syncs.'
+              : 'No payment of a matching amount near the due date yet. Search below, or leave it to be matched when the payment syncs.'}</div>}
             {candidates.map((c) => (
               <label key={c.transaction_id} className="row" style={{ alignItems: 'flex-start', flexWrap: 'nowrap', cursor: 'pointer' }}>
                 <input type="checkbox" checked={links.includes(c.transaction_id)}
@@ -328,6 +336,7 @@ function SeriesView({ id, series }: { id: number; series?: Series }) {
   const avg = withUsage.length ? withUsage.reduce((a, p) => a + Number(p.usage_value), 0) / withUsage.length : null
   const latest = [...pts].reverse().find((p) => p.usage_value !== null)
   const unit = series?.unit ?? latest?.usage_unit ?? ''
+  const paystub = pts.length > 0 && pts.every((p) => p.document_type === 'paystub')
   return (
     <>
       <Card style={{ gap: 'var(--space-2)' }}>
@@ -337,25 +346,28 @@ function SeriesView({ id, series }: { id: number; series?: Series }) {
               {series?.category_id && <><Link to={categoryPath(series.category_id)}>{series.category_name}</Link> · </>}
               {series?.vendor ?? series?.name}
             </div>
-            <div className="card-title">Usage · {unit || 'per statement'} per statement period</div>
+            <div className="card-title">{paystub ? 'Gross pay per pay period' : `Usage · ${unit || 'per statement'} per statement period`}</div>
           </div>
           <div className="row small muted-2" style={{ gap: 'var(--space-4)' }}>
-            <span>12-mo avg <strong style={{ color: 'var(--color-text)' }}>{avg === null ? '—' : fmtUsage(avg, unit)}</strong></span>
+            <span>{paystub ? 'Avg of last 12' : '12-mo avg'} <strong style={{ color: 'var(--color-text)' }}>{avg === null ? '—' : fmtUsage(avg, unit)}</strong></span>
             <span>Latest <strong style={{ color: 'var(--color-text)' }}>{latest ? fmtUsage(latest.usage_value, latest.usage_unit) : '—'}</strong></span>
           </div>
         </div>
         <LineChart points={last12.map((p) => ({
-          label: monthOf(p.period_end ?? p.statement_date),
+          // Paychecks come several times a month, so label them by pay date.
+          label: paystub && p.statement_date ? shortDate(p.statement_date) : monthOf(p.period_end ?? p.statement_date),
           value: p.usage_value === null ? null : Number(p.usage_value),
-          title: `${periodLabel(p)}: ${fmtUsage(p.usage_value, p.usage_unit)} · ${money(p.amount_due)}`,
+          title: `${periodLabel(p)}: ${fmtUsage(p.usage_value, p.usage_unit)} · ${money(p.amount_due)}${paystub ? ' net' : ''}`,
         }))} format={(v) => fmtUsage(v, unit)} />
       </Card>
       <TableCard>
         <table className="table">
           <thead>
-            <tr><SortTh s={sort} k="statement">Statement</SortTh><SortTh s={sort} k="period">Period</SortTh>
-              <SortTh s={sort} k="usage">Usage</SortTh><SortTh s={sort} k="cost">Cost / unit</SortTh>
-              <SortTh s={sort} k="paid">Linked transaction</SortTh><SortTh s={sort} k="amount" right>Amount</SortTh></tr>
+            <tr><SortTh s={sort} k="statement">{paystub ? 'Paystub' : 'Statement'}</SortTh><SortTh s={sort} k="period">Period</SortTh>
+              <SortTh s={sort} k="usage">{paystub ? 'Gross pay' : 'Usage'}</SortTh>
+              {!paystub && <SortTh s={sort} k="cost">Cost / unit</SortTh>}
+              <SortTh s={sort} k="paid">{paystub ? 'Deposit' : 'Linked transaction'}</SortTh>
+              <SortTh s={sort} k="amount" right>{paystub ? 'Net pay' : 'Amount'}</SortTh></tr>
           </thead>
           <tbody>
             {table.map((p) => (
@@ -365,9 +377,9 @@ function SeriesView({ id, series }: { id: number; series?: Series }) {
                 </td>
                 <td className="text-muted nowrap">{periodLabel(p)}</td>
                 <td className="nowrap">{fmtUsage(p.usage_value, p.usage_unit)}</td>
-                <td className="nowrap text-muted">{p.cost_per_unit ? `$${Number(p.cost_per_unit).toFixed(4)}` : '—'}</td>
+                {!paystub && <td className="nowrap text-muted">{p.cost_per_unit ? `$${Number(p.cost_per_unit).toFixed(4)}` : '—'}</td>}
                 <td>
-                  {p.transactions.length === 0 ? <span className="text-muted small">— (no payment linked)</span> : p.transactions.map((t) => (
+                  {p.transactions.length === 0 ? <span className="text-muted small">— (no {paystub ? 'deposit' : 'payment'} linked)</span> : p.transactions.map((t) => (
                     <div key={t.id} className="small">
                       <Link to={txnPath(t.id)}>{shortDate(t.txn_date)} · {t.description}</Link>
                     </div>

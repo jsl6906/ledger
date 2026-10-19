@@ -513,7 +513,8 @@ export interface Series {
   is_active: boolean; tag_id: number | null; statement_count: number; latest_period_end: string | null
 }
 export interface SeriesPoint {
-  statement_id: number; filename: string; attachment_id: number; period_start: string | null; period_end: string | null
+  statement_id: number; filename: string; attachment_id: number; document_type: string | null
+  period_start: string | null; period_end: string | null
   statement_date: string | null; amount_due: string | null; usage_value: string | null; usage_unit: string | null
   cost_per_unit: string | null; transactions: TxnBrief[]
 }

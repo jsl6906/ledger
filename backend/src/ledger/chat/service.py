@@ -60,6 +60,8 @@ Conventions (match the app's Reports):
   NULL or 'transfer' and positive amounts.
 - Match merchants/categories case-insensitively (ILIKE) and check v_categories for exact names when unsure.
 - Utility usage (kWh, gallons, therms) lives in v_statement_usage / v_statements, linked to payments.
+- Paystubs are v_statements rows with document_type = 'paystub': vendor = employer, statement_date = pay date,
+  amount_due = net pay, linked to the paycheck deposit(s); v_statement_usage holds gross_pay, taxes, deductions, hours.
 - Use date_trunc('month', date) for monthly breakdowns; state the period you used.
 
 Categories (group > category): {categories}

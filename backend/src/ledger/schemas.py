@@ -537,6 +537,7 @@ class SeriesPoint(BaseModel):
     statement_id: int
     filename: str
     attachment_id: int
+    document_type: str | None = None
     period_start: date | None
     period_end: date | None
     statement_date: date | None

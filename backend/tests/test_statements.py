@@ -292,3 +292,128 @@ async def test_reupload_from_transaction_reuses_statement(client, monkeypatch):
     # A refresh keeps the user's choice rather than reverting to the automatic guess.
     st = (await client.post(f"/api/statements/{first['id']}/refresh-links")).json()
     assert st["suggestion"]["transaction_ids"] == [real["id"]]
+
+
+def _paystub(employer: str, pay_date: str, net: float, gross: float, deposits: list[float] | None = None):
+    from ledger.ai import statements as ai_st
+
+    async def fake_extract(data, mime_type, filename):
+        return ai_st.BillExtraction(
+            document_type="paystub",
+            vendor=employer,
+            service_type="Paycheck",
+            statement_date=pay_date,
+            period_start=None,
+            period_end=None,
+            amount_due=net,
+            deposits=deposits or [],
+            usage=[
+                ai_st.UsageMetric(metric="gross_pay", value=gross, unit="USD", is_primary=True),
+                ai_st.UsageMetric(metric="taxes", value=round(gross - net, 2), unit="USD", is_primary=False),
+                ai_st.UsageMetric(metric="hours_worked", value=80, unit="hours", is_primary=False),
+            ],
+            summary=f"{employer} paystub {pay_date}",
+        )
+
+    return fake_extract
+
+
+async def test_paystub_links_to_deposit(client, monkeypatch):
+    import ledger.jobs.worker as worker
+    from ledger.ai import statements as ai_st
+
+    monkeypatch.setattr(worker.JobContext, "progress", _no_progress)
+    acct = (await client.post("/api/accounts", json={"name": "Payroll Checking"})).json()
+
+    async def txn(day: str, description: str, amount: str) -> dict:
+        body = {"txn_date": day, "description": description, "amount": amount, "account_id": acct["id"]}
+        return (await client.post("/api/transactions", json=body)).json()
+
+    deposit = await txn("2025-03-14", "ACH DEPOSIT PPD 88213", "2413.57")
+    await txn("2025-02-28", "ACH DEPOSIT PPD 88213", "2413.57")
+    await txn("2025-03-14", "TRANSFER TO SAVINGS", "-2413.57")
+
+    monkeypatch.setattr(ai_st, "extract_bill", _paystub("Acme Corp", "2025-03-14", 2413.57, 3400.00))
+    st = await _upload(client, "acme-2025-03-14.pdf", b"%PDF-1.7 acme 0314")
+    sug = st["suggestion"]
+    assert st["document_type"] == "paystub"
+    assert sug["series_id"] is None and sug["one_off"] is False
+    assert sug["new_series_name"] == "Paycheck · Acme Corp"
+    assert sug["new_series_category_id"] is not None  # seeded "Paycheck Income" category
+    # Only money in, and only within days of the pay date: not the previous paycheck nor a same-sized transfer out.
+    assert [c["transaction_id"] for c in sug["candidates"]] == [deposit["id"]]
+    assert sug["transaction_ids"] == [deposit["id"]]
+
+    st = (await client.post(f"/api/statements/{st['id']}/approve", json={"transaction_ids": sug["transaction_ids"]})).json()
+    assert st["status"] == "approved" and st["series_name"] == "Paycheck · Acme Corp"
+    t = (await client.get(f"/api/transactions/{deposit['id']}")).json()
+    assert t["has_statement"] is True and t["category_name"] == "Paycheck Income"
+    assert "Paycheck · Acme Corp" in [tg["name"] for tg in t["tags"]]
+
+    series = next(s for s in (await client.get("/api/statement-series")).json() if s["name"] == "Paycheck · Acme Corp")
+    assert series["primary_metric"] == "gross_pay" and series["unit"] == "USD"
+    hist = (await client.get(f"/api/statement-series/{series['id']}/history")).json()
+    assert hist[0]["document_type"] == "paystub" and hist[0]["usage_value"] == "3400.000"
+    assert hist[0]["amount_due"] == "2413.57" and hist[0]["cost_per_unit"] is None
+
+    # A second employer's paystub is not filed under the first just because both are paychecks.
+    monkeypatch.setattr(ai_st, "extract_bill", _paystub("Globex", "2025-03-21", 1210.04, 1500.00))
+    other = await _upload(client, "globex-2025-03-21.pdf", b"%PDF-1.7 globex 0321")
+    assert other["suggestion"]["series_id"] is None
+    assert other["suggestion"]["new_series_name"] == "Paycheck · Globex"
+
+    # The same employer's next paystub joins its series.
+    monkeypatch.setattr(ai_st, "extract_bill", _paystub("Acme Corp", "2025-03-28", 2413.57, 3400.00))
+    nxt = await _upload(client, "acme-2025-03-28.pdf", b"%PDF-1.7 acme 0328")
+    assert nxt["suggestion"]["series_id"] == series["id"]
+
+
+async def test_paystub_split_deposit_links_each_part(client, monkeypatch):
+    import ledger.jobs.worker as worker
+    from ledger.ai import statements as ai_st
+
+    monkeypatch.setattr(worker.JobContext, "progress", _no_progress)
+    checking = (await client.post("/api/accounts", json={"name": "Split Checking"})).json()
+    savings = (await client.post("/api/accounts", json={"name": "Split Savings"})).json()
+    main = (
+        await client.post(
+            "/api/transactions",
+            json={
+                "txn_date": "2025-04-11",
+                "description": "INITECH PAYROLL",
+                "amount": "2537.11",
+                "account_id": checking["id"],
+            },
+        )
+    ).json()
+
+    monkeypatch.setattr(
+        ai_st, "extract_bill", _paystub("Initech", "2025-04-11", 3037.11, 4100.00, deposits=[2537.11, 500.00])
+    )
+    st = await _upload(client, "initech-2025-04-11.pdf", b"%PDF-1.7 initech 0411")
+    assert st["suggestion"]["transaction_ids"] == [main["id"]]
+
+    # The savings part posts a day later and is added to the suggestion alongside the first deposit.
+    part = (
+        await client.post(
+            "/api/transactions",
+            json={
+                "txn_date": "2025-04-12",
+                "description": "INITECH PAYROLL",
+                "amount": "500.00",
+                "account_id": savings["id"],
+            },
+        )
+    ).json()
+    st = (await client.get(f"/api/statements/{st['id']}")).json()
+    assert st["suggestion"]["transaction_ids"] == [main["id"], part["id"]]
+    assert "split deposit of $500.00" in next(
+        c["reason"] for c in st["suggestion"]["candidates"] if c["transaction_id"] == part["id"]
+    )
+
+    st = (
+        await client.post(
+            f"/api/statements/{st['id']}/approve", json={"transaction_ids": st["suggestion"]["transaction_ids"]}
+        )
+    ).json()
+    assert sorted(t["id"] for t in st["transactions"]) == sorted([main["id"], part["id"]])

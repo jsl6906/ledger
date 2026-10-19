@@ -14,6 +14,7 @@ DocumentType = Literal[
     "investment_statement",
     "utility_bill",
     "other_bill",
+    "paystub",
     "receipt",
     "tax_document",
     "annual_summary",
@@ -36,6 +37,7 @@ SYSTEM = """Classify a household financial document from an archive.
   purchases. loan_statement / investment_statement: mortgage, auto, student loan, brokerage, retirement.
 - utility_bill: electric, gas, water, sewer, trash, internet, phone. other_bill: insurance, subscriptions, medical,
   HOA and other invoices that are paid from an account.
+- paystub: a paycheck stub / earnings statement for one pay date.
 - receipt: a single purchase receipt. tax_document: W-2, 1099, 1098, tax returns.
 - annual_summary: year-end / annual account summaries that recap a year of activity (not a periodic statement).
 - other: anything else (credit reports, letters, notices, agreements).

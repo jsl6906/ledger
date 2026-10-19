@@ -1,7 +1,8 @@
 """Bills & statements: upload -> Gemini extraction -> suggested series/transaction links -> user approval.
 
 Payments often reach the ledger days after their receipt is filed, so statements still waiting on one are re-matched
-(without re-reading the document) whenever new transactions are committed.
+(without re-reading the document) whenever new transactions are committed. Paystubs go through the same flow but are
+matched to the paycheck deposits (money in) around their pay date rather than to payments out.
 """
 
 import logging
@@ -9,7 +10,7 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import case, delete, func, or_, select, text
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,7 @@ from ledger.imports.service import ImportError_, store_attachment
 from ledger.models import (
     Attachment,
     Category,
+    CategoryGroup,
     Statement,
     StatementSeries,
     StatementUsage,
@@ -33,6 +35,11 @@ log = logging.getLogger(__name__)
 
 AUTO_LINK_SCORE = 0.6
 CHOSEN = "Chosen by you"
+PAYSTUB = "paystub"
+
+
+def is_paystub(st: Statement) -> bool:
+    return st.document_type == PAYSTUB
 
 
 async def create_statement(
@@ -70,18 +77,21 @@ async def create_statement(
     return st
 
 
-async def _match_series(session: AsyncSession, vendor: str | None, service: str | None) -> tuple[int | None, str]:
+async def _match_series(
+    session: AsyncSession, vendor: str | None, service: str | None, paystub: bool = False
+) -> tuple[int | None, str]:
     rows = (await session.scalars(select(StatementSeries).where(StatementSeries.is_active))).all()
     v, s = (vendor or "").lower(), (service or "").lower()
     for sr in rows:
         if v and s and (sr.vendor or "").lower() == v and (sr.service_type or "").lower() == s:
             return sr.id, f"Same vendor and service as {sr.name}"
+    # Every paystub is a "Paycheck"; only the employer tells two earners' (or two jobs') pay apart.
     for sr in rows:
-        if s and (sr.name.lower() == s or (sr.service_type or "").lower() == s):
+        if s and not paystub and (sr.name.lower() == s or (sr.service_type or "").lower() == s):
             return sr.id, f"Service type matches {sr.name}"
     for sr in rows:
         if v and (sr.vendor or "").lower() == v:
-            return sr.id, f"Vendor matches {sr.name}"
+            return sr.id, f"{'Employer' if paystub else 'Vendor'} matches {sr.name}"
     return None, "No existing series matches; a new one will be created"
 
 
@@ -89,7 +99,7 @@ _CANDIDATES = text(
     """--sql
     SELECT t.id, t.txn_date, t.amount, t.description,
            similarity(coalesce(t.merchant, ''), lower(CAST(:vendor AS text))) AS sim,
-           abs(t.amount + CAST(:amt AS numeric)) AS diff,
+           abs(abs(t.amount) - CAST(:amt AS numeric)) AS diff,
            EXISTS (
                SELECT 1 FROM statement_transaction x
                WHERE x.transaction_id = t.id AND x.statement_id IS DISTINCT FROM CAST(:sid AS bigint)
@@ -102,10 +112,10 @@ _CANDIDATES = text(
            ) AS series_merchant
     FROM "transaction" t
     WHERE t.deleted_at IS NULL
-      AND t.amount < 0
+      AND sign(t.amount) = CAST(:sign AS integer)
       AND t.txn_date BETWEEN :lo AND :hi
       AND (CAST(:amt AS numeric) IS NULL
-           OR abs(t.amount + CAST(:amt AS numeric)) <= greatest(1.00, CAST(:amt AS numeric) * 0.02))
+           OR abs(abs(t.amount) - CAST(:amt AS numeric)) <= greatest(1.00, CAST(:amt AS numeric) * 0.02))
     ORDER BY t.txn_date
     LIMIT 200
     """
@@ -113,37 +123,76 @@ _CANDIDATES = text(
 
 
 def link_window(st: Statement) -> tuple[date, date]:
-    """Dates a statement's payment may fall on: shortly before the document through a few weeks past its due date."""
+    """Dates a statement's payment may fall on: shortly before the document through a few weeks past its due date.
+
+    A paycheck lands within days of its pay date (some banks post it early), and the next one is only a week or two
+    later for the same amount, so a paystub's window stays tight around the pay date.
+    """
     # created_at is a server default: unloaded (not lazily fetched) on a just-flushed row, which is created today anyway.
     created = sa_inspect(st).dict.get("created_at")
-    anchor = st.statement_date or st.period_end or st.due_date or (created.date() if created else date.today())
+    today = created.date() if created else date.today()
+    if is_paystub(st):
+        if st.statement_date:
+            return st.statement_date - timedelta(days=4), st.statement_date + timedelta(days=5)
+        # No pay date printed: pay usually follows the period's end by up to a week or so.
+        anchor = st.period_end or today
+        return anchor - timedelta(days=2), anchor + timedelta(days=12)
+    anchor = st.statement_date or st.period_end or st.due_date or today
     return anchor - timedelta(days=10), (st.due_date or anchor + timedelta(days=30)) + timedelta(days=20)
 
 
-async def link_candidates(session: AsyncSession, st: Statement, series_id: int | None) -> list[dict]:
+def amount_targets(st: Statement) -> list[Decimal | None]:
+    """The amounts to look for: each direct deposit of a split paycheck, otherwise the statement's single amount."""
+    deposits = [Decimal(str(round(d, 2))) for d in (st.extracted or {}).get("deposits") or [] if d]
+    # An edited net pay that no longer adds up means the extracted split is stale.
+    if is_paystub(st) and len(deposits) > 1 and (st.amount_due is None or abs(sum(deposits) - st.amount_due) <= 1):
+        return deposits
+    return [st.amount_due]
+
+
+async def _scored(
+    session: AsyncSession, st: Statement, series_id: int | None, amt: Decimal | None, split: bool
+) -> list[dict]:
     lo, hi = link_window(st)
+    paystub = is_paystub(st)
     rows = (
         await session.execute(
             _CANDIDATES,
-            {"vendor": st.vendor or "", "amt": st.amount_due, "series": series_id, "sid": st.id, "lo": lo, "hi": hi},
+            {
+                "vendor": st.vendor or "",
+                "amt": amt,
+                "sign": 1 if paystub else -1,
+                "series": series_id,
+                "sid": st.id,
+                "lo": lo,
+                "hi": hi,
+            },
         )
     ).mappings()
     out = []
     for r in rows:
         sim = float(r["sim"])
-        if st.amount_due is None and sim < 0.3:
+        if amt is None and sim < 0.3:
             continue
         score, reasons = 0.0, []
-        if st.amount_due is not None:
+        if amt is not None:
             exact = r["diff"] == 0
             score += 0.5 if exact else 0.3
-            reasons.append("Exact amount" if exact else f"Amount within {money(r['diff'])}")
+            what = f"split deposit of {money(amt)}" if split else "amount"
+            reasons.append(f"Exact {what}" if exact else f"{what[0].upper()}{what[1:]} within {money(r['diff'])}")
+            # Payroll descriptions rarely name the employer the way the stub does; the narrow pay-date window does
+            # the disambiguating instead.
+            if exact and paystub and st.statement_date:
+                score += 0.1
+                reasons.append("Within days of the pay date")
         score += 0.3 * sim
         if sim >= 0.3:
-            reasons.append(f"Payee resembles {st.vendor}")
+            reasons.append(f"{'Payer' if paystub else 'Payee'} resembles {st.vendor}")
         if r["series_merchant"]:
             score += 0.2
-            reasons.append("Same payee as earlier bills in this series")
+            reasons.append(
+                "Same payer as earlier paychecks in this series" if paystub else "Same payee as earlier bills in this series"
+            )
         if r["already_linked"]:
             score -= 0.3
             reasons.append("Already linked to another statement")
@@ -158,7 +207,26 @@ async def link_candidates(session: AsyncSession, st: Statement, series_id: int |
             }
         )
     out.sort(key=lambda c: c["score"], reverse=True)
-    return out[:3]
+    return out
+
+
+async def link_candidates(session: AsyncSession, st: Statement, series_id: int | None) -> tuple[list[dict], list[int]]:
+    """Likely payments (paycheck deposits, for a paystub), best first, and those confident enough to pre-select.
+
+    Each expected amount gets its own best match, so every part of a split paycheck deposit is linked.
+    """
+    targets = amount_targets(st)
+    merged: dict[int, dict] = {}
+    picks: list[int] = []
+    for amt in targets:
+        found = await _scored(session, st, series_id, amt, split=len(targets) > 1)
+        best = next((c for c in found if c["transaction_id"] not in picks), None)
+        if best and best["score"] >= AUTO_LINK_SCORE:
+            picks.append(best["transaction_id"])
+        for c in [*found[:3], *([best] if best else [])]:
+            if c["transaction_id"] not in merged or c["score"] > merged[c["transaction_id"]]["score"]:
+                merged[c["transaction_id"]] = c
+    return sorted(merged.values(), key=lambda c: c["score"], reverse=True), picks
 
 
 def money(v) -> str:
@@ -193,6 +261,26 @@ async def _category_for(session: AsyncSession, service: str | None) -> int | Non
     return await session.scalar(select(Category.id).where(func.lower(Category.name) == service.lower()))
 
 
+_PAY_WORDS = ("paycheck", "salary", "payroll", "wage")
+
+
+async def _paycheck_category(session: AsyncSession, service: str | None) -> int | None:
+    """The household's income category for paychecks, whatever it's called (e.g. "Paycheck Income" in a "Paycheck"
+    group); one matching by both its own and its group's name wins over e.g. a side job's "Home Care Paycheck"."""
+    if found := await _category_for(session, service):
+        return found
+    hits = [
+        case((or_(*[col.ilike(f"%{w}%") for w in _PAY_WORDS]), 1), else_=0) for col in (Category.name, CategoryGroup.name)
+    ]
+    return await session.scalar(
+        select(Category.id)
+        .join(CategoryGroup, CategoryGroup.id == Category.group_id)
+        .where(Category.type == "income", Category.is_active, hits[0] + hits[1] > 0)
+        .order_by((hits[0] + hits[1]).desc(), CategoryGroup.sort_order, Category.sort_order, Category.id)
+        .limit(1)
+    )
+
+
 async def extract_into_statement(session: AsyncSession, st: Statement) -> dict:
     from ledger.ai.statements import extract_bill
 
@@ -209,22 +297,28 @@ async def extract_into_statement(session: AsyncSession, st: Statement) -> dict:
         StatementUsage(metric=u.metric[:60], value=Decimal(str(u.value)), unit=(u.unit or None), is_primary=u.is_primary)
         for u in r.usage
     ]
-    series_id, series_reason = await _match_series(session, r.vendor, r.service_type)
-    candidates = await link_candidates(session, st, series_id)
+    paystub = r.document_type == PAYSTUB
+    series_id, series_reason = await _match_series(session, r.vendor, r.service_type, paystub)
+    candidates, picks = await link_candidates(session, st, series_id)
     presets = [i for i in st.suggestion.get("preset_transaction_ids", []) if i]
     candidates = await _pin(session, candidates, presets, CHOSEN)
+    if paystub:
+        new_name = f"{r.service_type or 'Paycheck'} · {r.vendor}" if r.vendor else (r.service_type or "Paycheck")
+    else:
+        new_name = r.service_type or r.vendor or "Other bills"
     st.suggestion = {
         **st.suggestion,
         "series_id": series_id,
         "series_reason": series_reason,
-        "new_series_name": None if series_id else (r.service_type or r.vendor or "Other bills"),
-        "new_series_category_id": None if series_id else await _category_for(session, r.service_type),
+        "new_series_name": None if series_id else new_name[:120],
+        "new_series_category_id": None
+        if series_id
+        else await (_paycheck_category if paystub else _category_for)(session, r.service_type),
         # No recurring service and no existing series: a one-off receipt, not a new bill named after the vendor.
-        "one_off": series_id is None and not r.service_type,
+        "one_off": series_id is None and not r.service_type and not paystub,
         "service_type": r.service_type,
         "candidates": candidates,
-        "transaction_ids": presets
-        or ([candidates[0]["transaction_id"]] if candidates and candidates[0]["score"] >= AUTO_LINK_SCORE else []),
+        "transaction_ids": presets or picks,
         "refreshed_at": datetime.now(UTC).isoformat(),
     }
     st.status, st.error = "suggested", None
@@ -234,17 +328,22 @@ async def extract_into_statement(session: AsyncSession, st: Statement) -> dict:
 async def refresh_links(session: AsyncSession, st: Statement) -> bool:
     """Re-match a suggested or approved statement against the ledger as it is now, without re-reading the document.
 
-    A suggested statement with no payment chosen yet gets the best match pre-selected for approval; approved ones only
-    get fresh candidates (linking them stays the user's call). True when the statement now has candidates.
+    A suggested statement with no payment chosen yet gets the best match pre-selected for approval (for a split
+    paycheck, each deposit still missing); approved ones only get fresh candidates (linking them stays the user's
+    call). True when the statement now has candidates.
     """
     sug = dict(st.suggestion or {})
     presets = [i for i in sug.get("preset_transaction_ids", []) if i]
-    candidates = await link_candidates(session, st, st.series_id if st.status == "approved" else sug.get("series_id"))
+    candidates, picks = await link_candidates(session, st, st.series_id if st.status == "approved" else sug.get("series_id"))
     candidates = await _pin(session, candidates, presets, CHOSEN)
     found = {c["transaction_id"] for c in candidates}
     chosen = [i for i in sug.get("transaction_ids", []) if i in found]
-    if st.status == "suggested" and not chosen and candidates and candidates[0]["score"] >= AUTO_LINK_SCORE:
-        chosen = [candidates[0]["transaction_id"]]
+    if st.status == "suggested":
+        wanted = len(amount_targets(st))
+        if not chosen:
+            chosen = [i for i in presets if i in found] or picks
+        elif wanted > 1 and len(chosen) < wanted:
+            chosen = [*chosen, *[p for p in picks if p not in chosen]][:wanted]
     st.suggestion = {
         **sug,
         "candidates": candidates,
@@ -272,7 +371,8 @@ async def relink_unmatched(session: AsyncSession, start: date | None = None, end
     )
     matched = 0
     for st in rows:
-        if st.status == "suggested" and (st.suggestion or {}).get("transaction_ids"):
+        # A split paycheck keeps waiting until every deposit has a match.
+        if st.status == "suggested" and len((st.suggestion or {}).get("transaction_ids") or []) >= len(amount_targets(st)):
             continue
         lo, hi = link_window(st)
         if (end and lo > end) or (start and hi < start):

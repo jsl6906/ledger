@@ -9,7 +9,7 @@ from ledger.db.base import Base
 # pending -> classified -> done | review | skipped | failed
 BACKFILL_STATUSES = ("pending", "classified", "done", "review", "skipped", "failed")
 STATEMENT_KINDS = ("bank_statement", "credit_card_statement", "loan_statement", "investment_statement")
-BILL_KINDS = ("utility_bill", "other_bill")
+BILL_KINDS = ("utility_bill", "other_bill", "paystub")
 
 
 class BackfillFile(Base):
