@@ -14,7 +14,7 @@ import { fullDate, iso, money, monthName, parseIso, shortDate } from '../format'
 import { useAccounts, useMembers } from '../hooks'
 import { accountPath, categoryPath, merchantKey, merchantPath, txnPath } from '../links'
 import { ORIGINS } from '../review'
-import { ruleDraft } from '../rules'
+import { ruleBody, ruleDraft, type RuleDraft } from '../rules'
 
 type Draft = {
   txn_date: string
@@ -103,7 +103,7 @@ function CategoryProvenance({ txn, onCreateRule }: { txn: Transaction; onCreateR
   )
 }
 
-type PromptState = { categoryId: number } | { done: string }
+type PromptState = { categoryId: number; fromAi?: boolean } | { done: string }
 // Parents key the detail by updated_at, so a save remounts it; keep the rule prompt outside component state.
 const prompts = new Map<number, PromptState>()
 
@@ -119,34 +119,61 @@ function usePrompt(txnId: number | undefined) {
   return [state, set] as const
 }
 
-export function RulePrompt({ txn, categoryId, onDone, onClose }: {
-  txn: Transaction; categoryId: number; onDone: (msg: string) => void; onClose: () => void
+function sameSpec(r: CategoryRule, d: RuleDraft) {
+  const b = ruleBody(d)
+  const pattern = d.match_type === 'merchant' ? b.pattern.toLowerCase() : b.pattern
+  const amt = (v: string | null) => (v === null ? null : Number(v).toFixed(2))
+  return r.match_type === b.match_type && r.pattern === pattern && r.account_id === b.account_id
+    && amt(r.amount_min) === b.amount_min && amt(r.amount_max) === b.amount_max
+}
+
+export function RulePrompt({ txn, categoryId, intro, onDone, onClose }: {
+  txn: Transaction; categoryId: number; intro?: ReactNode; onDone: (msg: string) => void; onClose: () => void
 }) {
   const others = useQuery({
     queryKey: ['rules', 'for', txn.id],
     queryFn: () => get<CategoryRule[]>(`/rules/for-transaction/${txn.id}`),
   })
   const pattern = txn.merchant ?? txn.description
-  const conflicts = (others.data ?? []).filter((r) => r.is_active && r.category_id !== categoryId)
-  const same = (others.data ?? []).find((r) => r.match_type === 'merchant' && r.pattern === txn.merchant && !r.account_id
-    && r.amount_min === null && r.amount_max === null)
+  const [initial] = useState(() => ruleDraft({ match_type: txn.merchant ? 'merchant' : 'contains', pattern, category_id: categoryId }))
+  const [draft, setDraft] = useState(initial)
+  const rules = others.data ?? []
+  const conflicts = rules.filter((r) => r.is_active && r.category_id !== categoryId)
+  // The catch-all merchant rule learned from an accepted AI suggestion: refining it (e.g. an amount range)
+  // should narrow that rule rather than add another one beside it that the catch-all would still back up.
+  const learned = rules.find((r) => r.source !== 'user' && r.match_type === 'merchant' && r.pattern === txn.merchant
+    && !r.account_id && r.amount_min === null && r.amount_max === null && r.category_id === draft.category_id)
+  const same = learned ?? rules.find((r) => sameSpec(r, draft))
   return (
     <div className="callout" style={{ color: 'inherit' }}>
       <RuleEditor compact
-        initial={ruleDraft({ match_type: txn.merchant ? 'merchant' : 'contains', pattern, category_id: categoryId })}
+        initial={initial}
+        ruleId={learned?.id}
+        onChange={setDraft}
         seedAccount={txn.account_id && txn.account_name ? { id: txn.account_id, name: txn.account_name } : null}
+        seedAmount={txn.amount}
         intro={
           <>
-            <strong>Categorize similar transactions the same way?</strong>
-            <div className="small">
-              Changing a category by hand only affects what you changed. A rule also categorizes future imports, and can fix
-              existing transactions now.
-            </div>
+            {intro ?? (
+              <>
+                <strong>Categorize similar transactions the same way?</strong>
+                <div className="small">
+                  Changing a category by hand only affects what you changed. A rule also categorizes future imports, and can fix
+                  existing transactions now.
+                </div>
+              </>
+            )}
+            {learned && (
+              <div className="small">
+                An automatic rule from an accepted AI suggestion already sends every <strong>{learned.pattern}</strong> transaction
+                to {learned.category_name}. Saving replaces it with the rule below.
+              </div>
+            )}
             {conflicts.length > 0 && (
               <div className="small">
                 Rules already matching this transaction: {conflicts.map((r, i) => (
                   <span key={r.id}>{i > 0 && '; '}<Link to={`/rules?id=${r.id}`}>{r.description}</Link> → {r.category_name}</span>
-                ))}.{same ? ' Saving updates that merchant rule.' : ' A new rule takes precedence over equal-priority older ones.'}
+                ))}.{same ? ' Saving updates the identical rule.' : ' A new rule takes precedence over equal-priority older ones.'}
               </div>
             )}
           </>
@@ -356,7 +383,10 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
     mutationFn: () => post('/transactions/suggestions/accept', { ids: [txn!.id] }),
     onSuccess: () => {
       invalidate()
-      set('category_id', txn!.suggested_category_id)
+      qc.invalidateQueries({ queryKey: ['rules'] })
+      const cat = txn!.suggested_category_id
+      set('category_id', cat)
+      if (cat !== null) setRulePrompt({ categoryId: cat, fromAi: true })
     },
   })
 
@@ -446,6 +476,14 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
       )}
       {!isNew && rulePrompt && 'categoryId' in rulePrompt && (
         <RulePrompt key={rulePrompt.categoryId} txn={txn} categoryId={rulePrompt.categoryId}
+          intro={rulePrompt.fromAi ? (
+            <>
+              <strong>Suggestion accepted. Set up a rule for similar transactions?</strong>
+              <div className="small">
+                Fine-tune what it matches, limit it to an amount range, and choose which existing transactions it should change.
+              </div>
+            </>
+          ) : undefined}
           onDone={(msg) => setRulePrompt({ done: msg })} onClose={() => setRulePrompt(null)} />
       )}
       {!isNew && rulePrompt && 'done' in rulePrompt && (

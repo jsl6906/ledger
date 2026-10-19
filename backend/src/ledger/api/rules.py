@@ -88,6 +88,7 @@ class PreviewOut(BaseModel):
 
 class ApplyIn(BaseModel):
     include_user: bool = False
+    only_uncategorized: bool = False
 
 
 async def _outs(session: AsyncSession, rules: list[CategoryRule]) -> list[RuleOut]:
@@ -274,7 +275,7 @@ async def preview_rule(body: RuleSpecIn, session: AsyncSession = Depends(get_ses
 @router.post("/rules/{rule_id}/apply")
 async def apply_rule_now(rule_id: int, body: ApplyIn, session: AsyncSession = Depends(get_session)):
     r = await _rule(session, rule_id)
-    updated = await apply_rule(session, r, include_user=body.include_user)
+    updated = await apply_rule(session, r, include_user=body.include_user, only_uncategorized=body.only_uncategorized)
     await session.commit()
     return {"updated": updated}
 

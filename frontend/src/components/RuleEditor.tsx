@@ -26,24 +26,38 @@ type Props = {
   initial: RuleDraft
   /** Existing rule being edited (PUT); otherwise a new rule is created. */
   ruleId?: number
-  /** Prompt mode: only match, category and "this account"; identical rules are updated instead of rejected. */
+  /** Prompt mode: match, category, amount range and "this account"; identical rules are updated instead of rejected. */
   compact?: boolean
   /** In compact mode: the account the "only this account" checkbox refers to. */
   seedAccount?: { id: number; name: string } | null
+  /** In compact mode: the amount of the transaction the rule is based on. */
+  seedAmount?: string | null
   intro?: ReactNode
   saveLabel?: string
   cancelLabel?: string
+  onChange?: (d: RuleDraft) => void
   onDone: (msg: string) => void
   onCancel: () => void
 }
 
-export function RuleEditor({ initial, ruleId, compact = false, seedAccount, intro, saveLabel, cancelLabel = 'Cancel', onDone, onCancel }: Props) {
+/** Which existing transactions a newly saved rule recategorizes. */
+type ApplyScope = 'auto' | 'uncategorized' | 'none'
+
+export function RuleEditor({
+  initial, ruleId, compact = false, seedAccount, seedAmount, intro, saveLabel, cancelLabel = 'Cancel', onChange, onDone, onCancel,
+}: Props) {
   const qc = useQueryClient()
   const accounts = useAccounts()
   const [d, setD] = useState<RuleDraft>(initial)
-  const [applyNow, setApplyNow] = useState(true)
+  const [scope, setScope] = useState<ApplyScope>('auto')
   const [includeUser, setIncludeUser] = useState(false)
-  const set = <K extends keyof RuleDraft>(k: K, v: RuleDraft[K]) => setD((x) => ({ ...x, [k]: v }))
+  const radioName = useId()
+  const update = (patch: Partial<RuleDraft>) => {
+    const next = { ...d, ...patch }
+    setD(next)
+    onChange?.(next)
+  }
+  const set = <K extends keyof RuleDraft>(k: K, v: RuleDraft[K]) => update({ [k]: v } as Partial<RuleDraft>)
 
   const spec = useDebounced(specOf(d), 350)
   const preview = useQuery({
@@ -62,8 +76,11 @@ export function RuleEditor({ initial, ruleId, compact = false, seedAccount, intr
         ? await put<CategoryRule>(`/rules/${ruleId}`, body)
         : await post<CategoryRule>('/rules', { ...body, replace_existing: compact })
       let updated = 0
-      if (applyNow && p && (fixable > 0 || (includeUser && p.user > 0))) {
-        updated = (await post<{ updated: number }>(`/rules/${rule.id}/apply`, { include_user: includeUser })).updated
+      const wanted = scope === 'uncategorized' ? (p?.uncategorized ?? 0)
+        : scope === 'auto' ? fixable + (includeUser ? p?.user ?? 0 : 0) : 0
+      if (p && wanted > 0) {
+        const apply = scope === 'uncategorized' ? { only_uncategorized: true } : { include_user: includeUser }
+        updated = (await post<{ updated: number }>(`/rules/${rule.id}/apply`, apply)).updated
       }
       return { rule, updated }
     },
@@ -78,6 +95,20 @@ export function RuleEditor({ initial, ruleId, compact = false, seedAccount, intr
     ? <MerchantKeyInput value={d.pattern} onChange={(v) => set('pattern', v)} />
     : <input className="input" value={d.pattern} placeholder={d.match_type === 'regex' ? 'e.g. ^(shell|exxon|bp)\\b' : 'e.g. netflix'}
         onChange={(e) => set('pattern', e.target.value)} />
+
+  const amountFields = (
+    <>
+      <Field label="Amount at least">
+        <input className="input" type="number" min={0} step="0.01" value={d.amount_min} placeholder="any"
+          onChange={(e) => set('amount_min', e.target.value)} />
+      </Field>
+      <Field label="Amount at most">
+        <input className="input" type="number" min={0} step="0.01" value={d.amount_max} placeholder="any"
+          onChange={(e) => set('amount_max', e.target.value)} />
+      </Field>
+    </>
+  )
+  const seedAbs = seedAmount ? Math.abs(Number(seedAmount)).toFixed(2) : null
 
   return (
     <div className="stack">
@@ -96,13 +127,26 @@ export function RuleEditor({ initial, ruleId, compact = false, seedAccount, intr
         <CategorySelect value={d.category_id} onChange={(v) => set('category_id', v)} emptyLabel="Choose…" />
       </Field>
       {compact ? (
-        seedAccount && (
-          <label className="row small">
-            <input type="checkbox" checked={d.account_id === seedAccount.id}
-              onChange={(e) => set('account_id', e.target.checked ? seedAccount.id : null)} />
-            Only in {seedAccount.name}
-          </label>
-        )
+        <>
+          <div className="grid-form">{amountFields}</div>
+          {seedAbs && (
+            <div className="row small muted-2" style={{ gap: 8 }}>
+              <span>This transaction: {money(seedAbs)}</span>
+              <button type="button" className="link-btn"
+                onClick={() => update({ amount_min: seedAbs, amount_max: seedAbs })}>Exactly this amount</button>
+              {(d.amount_min !== '' || d.amount_max !== '') && (
+                <button type="button" className="link-btn" onClick={() => update({ amount_min: '', amount_max: '' })}>Any amount</button>
+              )}
+            </div>
+          )}
+          {seedAccount && (
+            <label className="row small">
+              <input type="checkbox" checked={d.account_id === seedAccount.id}
+                onChange={(e) => set('account_id', e.target.checked ? seedAccount.id : null)} />
+              Only in {seedAccount.name}
+            </label>
+          )}
+        </>
       ) : (
         <>
           <div className="grid-form">
@@ -112,14 +156,7 @@ export function RuleEditor({ initial, ruleId, compact = false, seedAccount, intr
                 {(accounts.data ?? []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
             </Field>
-            <Field label="Amount at least">
-              <input className="input" type="number" min={0} step="0.01" value={d.amount_min} placeholder="any"
-                onChange={(e) => set('amount_min', e.target.value)} />
-            </Field>
-            <Field label="Amount at most">
-              <input className="input" type="number" min={0} step="0.01" value={d.amount_max} placeholder="any"
-                onChange={(e) => set('amount_max', e.target.value)} />
-            </Field>
+            {amountFields}
           </div>
           <div className="grid-form">
             <Field label="Priority (lower runs first)">
@@ -158,18 +195,29 @@ export function RuleEditor({ initial, ruleId, compact = false, seedAccount, intr
               {p.uncategorized + p.auto + p.user > p.samples.length && <div className="muted-2">…and more</div>}
             </div>
           )}
-          {fixable > 0 && (
-            <label className="row">
-              <input type="checkbox" checked={applyNow} onChange={(e) => setApplyNow(e.target.checked)} />
-              Recategorize the {fixable.toLocaleString()} uncategorized / automatically categorized now
-            </label>
-          )}
-          {p.user > 0 && (
-            <label className="row">
-              <input type="checkbox" checked={includeUser} disabled={fixable > 0 && !applyNow}
-                onChange={(e) => { setIncludeUser(e.target.checked); if (e.target.checked) setApplyNow(true) }} />
-              Also change the {p.user.toLocaleString()} you categorized by hand
-            </label>
+          {(fixable > 0 || p.user > 0) && (
+            <div className="stack" style={{ gap: 2 }}>
+              <div className="muted-2">Existing transactions:</div>
+              <label className="radio" style={{ fontSize: 'inherit' }}>
+                <input type="radio" name={`${radioName}-scope`} checked={scope === 'auto'} onChange={() => setScope('auto')} />
+                <span className="dot" />Recategorize all uncategorized and automatically categorized ({fixable.toLocaleString()})
+              </label>
+              {p.user > 0 && (
+                <label className="row" style={{ paddingLeft: 24 }}>
+                  <input type="checkbox" checked={includeUser} disabled={scope !== 'auto'}
+                    onChange={(e) => setIncludeUser(e.target.checked)} />
+                  Also change the {p.user.toLocaleString()} you categorized by hand
+                </label>
+              )}
+              <label className="radio" style={{ fontSize: 'inherit' }}>
+                <input type="radio" name={`${radioName}-scope`} checked={scope === 'uncategorized'} onChange={() => setScope('uncategorized')} />
+                <span className="dot" />Only uncategorized ({p.uncategorized.toLocaleString()})
+              </label>
+              <label className="radio" style={{ fontSize: 'inherit' }}>
+                <input type="radio" name={`${radioName}-scope`} checked={scope === 'none'} onChange={() => setScope('none')} />
+                <span className="dot" />Leave them; only apply going forward
+              </label>
+            </div>
           )}
           {fixable === 0 && p.user === 0 && <div className="muted-2">Nothing to change today; the rule applies to future transactions.</div>}
         </div>

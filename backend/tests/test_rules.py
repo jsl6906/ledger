@@ -82,6 +82,25 @@ async def test_replace_existing(client, rx):
     assert b.status_code == 201 and b.json()["id"] == a["id"] and b.json()["category_id"] == water
 
 
+async def test_apply_uncategorized_only(client, rx):
+    groc, water = rx["cats"]["Groceries"], rx["cats"]["Water"]
+    loose = await rx["add"]("RXU PAYMENT OLD", "-20.00")
+    await client.post("/api/rules", json={"match_type": "contains", "pattern": "rxu payment auto", "category_id": water})
+    auto = await rx["add"]("RXU PAYMENT AUTO", "-20.00")
+    assert auto["category_id"] == water and auto["category_source"] == "rule"
+
+    rule = (
+        await client.post("/api/rules", json={"match_type": "contains", "pattern": "rxu payment", "category_id": groc})
+    ).json()
+    body = {"only_uncategorized": True, "include_user": True}
+    assert (await client.post(f"/api/rules/{rule['id']}/apply", json=body)).json() == {"updated": 1}
+    assert (await client.get(f"/api/transactions/{loose['id']}")).json()["category_id"] == groc
+    assert (await client.get(f"/api/transactions/{auto['id']}")).json()["category_id"] == water
+
+    assert (await client.post(f"/api/rules/{rule['id']}/apply", json={})).json() == {"updated": 1}
+    assert (await client.get(f"/api/transactions/{auto['id']}")).json()["category_id"] == groc
+
+
 async def test_category_aliases(client, rx):
     groc, water = rx["cats"]["Groceries"], rx["cats"]["Water"]
     r = await client.post("/api/category-aliases", json={"alias": "  RX Food & Dining ", "category_id": groc})

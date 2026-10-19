@@ -107,14 +107,22 @@ async def matching_rules(session: AsyncSession, txn_id: int) -> list[CategoryRul
     return list((await session.scalars(stmt)).all())
 
 
-async def apply_rule(session: AsyncSession, rule: CategoryRule, include_user: bool = False) -> int:
-    """Point every matching transaction at `rule`'s category; hand-set categories only when include_user."""
+async def apply_rule(
+    session: AsyncSession, rule: CategoryRule, include_user: bool = False, only_uncategorized: bool = False
+) -> int:
+    """Point matching transactions at `rule`'s category.
+
+    By default this covers uncategorized and automatically categorized ones; hand-set categories only when
+    include_user, and only uncategorized ones when only_uncategorized (which wins over include_user).
+    """
     conds = [
         Transaction.deleted_at.is_(None),
         rule_condition(rule),
         or_(Transaction.category_id.is_(None), Transaction.category_id != rule.category_id),
     ]
-    if not include_user:
+    if only_uncategorized:
+        conds.append(Transaction.category_id.is_(None))
+    elif not include_user:
         conds.append(func.coalesce(Transaction.category_source, "") != "user")
     res = await session.execute(
         update(Transaction)
