@@ -140,8 +140,24 @@ async def list_members(session: AsyncSession = Depends(get_session)):
     return (await session.scalars(select(HouseholdMember).order_by(HouseholdMember.name))).all()
 
 
+async def _check_sign_in_email(session: AsyncSession, body: MemberIn, obj_id: int | None = None) -> None:
+    """Google sign-in finds the member by email, so two members who can sign in may not share one."""
+    if not body.can_sign_in:
+        return
+    clash = await session.scalar(
+        select(HouseholdMember.name).where(
+            HouseholdMember.can_sign_in.is_(True),
+            func.lower(HouseholdMember.email) == body.email.lower(),
+            HouseholdMember.id != (obj_id or 0),
+        )
+    )
+    if clash:
+        raise HTTPException(409, f"{clash} already signs in with {body.email}")
+
+
 @router.post("/members", response_model=MemberOut, status_code=201)
 async def create_member(body: MemberIn, session: AsyncSession = Depends(get_session)):
+    await _check_sign_in_email(session, body)
     obj = HouseholdMember(**body.model_dump())
     session.add(obj)
     await _commit(session)
@@ -151,6 +167,7 @@ async def create_member(body: MemberIn, session: AsyncSession = Depends(get_sess
 @router.put("/members/{obj_id}", response_model=MemberOut)
 async def update_member(obj_id: int, body: MemberIn, session: AsyncSession = Depends(get_session)):
     obj = await _get(session, HouseholdMember, obj_id)
+    await _check_sign_in_email(session, body, obj_id)
     for k, v in body.model_dump().items():
         setattr(obj, k, v)
     await _commit(session)

@@ -1,6 +1,7 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,8 +28,37 @@ async def logout(request: Request):
 
 
 @public.get("/auth/me")
-async def me(request: Request):
-    return {"authenticated": auth.is_authenticated(request)}
+async def me(request: Request, session: AsyncSession = Depends(get_session)):
+    member = await auth.signed_in_member(request, session)
+    return {
+        "authenticated": auth.is_authenticated(request),
+        "member": {"id": member.id, "name": member.name, "initials": member.initials} if member else None,
+        "google": auth.google_enabled(),
+    }
+
+
+@public.get("/auth/google/start", include_in_schema=False)
+async def google_start(request: Request):
+    if not auth.google_enabled():
+        raise HTTPException(404, "Google sign-in is not configured")
+    return RedirectResponse(auth.google_start_url(request), status_code=303)
+
+
+@public.get("/auth/google/callback", include_in_schema=False)
+async def google_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    # Google sends ?error=access_denied (and no code) when the user backs out of the account chooser.
+    try:
+        if not auth.google_enabled():
+            raise auth.GoogleSignInError("not_configured")
+        await auth.finish_google(request, session, code, state)
+    except auth.GoogleSignInError as exc:
+        return RedirectResponse(f"/?login_error={exc.code}", status_code=303)
+    return RedirectResponse("/", status_code=303)
 
 
 @router.get("/jobs", response_model=list[JobOut], tags=["jobs"])

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     session_secret: SecretStr = SecretStr("dev-only-change-me")
     session_max_age_days: int = 30
     cookie_secure: bool = False
+    # Google sign-in (OAuth "Web application" client); household members with "Can sign in" may use it
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: SecretStr | None = None
 
     # AI
     gemini_key: SecretStr | None = None

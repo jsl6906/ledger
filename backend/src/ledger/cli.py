@@ -34,6 +34,8 @@ def config_problems() -> list[str]:
         problems.append("SESSION_SECRET must be set to a random value of at least 32 characters")
     if not s.app_password_hash:
         problems.append("APP_PASSWORD_HASH is not set (create one with: ledger hash-password)")
+    if bool(s.google_oauth_client_id) != bool(s.google_oauth_client_secret):
+        problems.append("Google sign-in needs both GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET")
     return problems
 
 

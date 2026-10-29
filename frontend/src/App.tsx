@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
-import { get, setUnauthorizedHandler } from './api'
+import { get, setUnauthorizedHandler, type Me } from './api'
 import { Layout } from './components/Layout'
 import { TipProvider } from './components/Tip'
 import { AccountPage } from './pages/AccountPage'
@@ -27,23 +27,26 @@ import { Transactions } from './pages/Transactions'
 const Chat = lazy(() => import('./pages/Chat').then((m) => ({ default: m.Chat })))
 
 export default function App() {
-  const [authed, setAuthed] = useState<boolean | null>(null)
+  const [me, setMe] = useState<Me | null>(null)
 
+  const loadMe = () => {
+    get<Me>('/auth/me')
+      .then(setMe)
+      .catch(() => setMe({ authenticated: false, member: null, google: false }))
+  }
   useEffect(() => {
-    setUnauthorizedHandler(() => setAuthed(false))
-    get<{ authenticated: boolean }>('/auth/me')
-      .then((r) => setAuthed(r.authenticated))
-      .catch(() => setAuthed(false))
+    setUnauthorizedHandler(() => setMe((m) => ({ authenticated: false, member: null, google: m?.google ?? false })))
+    loadMe()
   }, [])
 
-  if (authed === null) return null
-  if (!authed) return <Login onLogin={() => setAuthed(true)} />
+  if (me === null) return null
+  if (!me.authenticated) return <Login onLogin={loadMe} google={me.google} />
 
   return (
     <BrowserRouter>
       <TipProvider>
       <Routes>
-        <Route element={<Layout onLogout={() => setAuthed(false)} />}>
+        <Route element={<Layout me={me.member} onLogout={() => setMe({ ...me, authenticated: false, member: null })} />}>
           <Route index element={<Dashboard />} />
           <Route path="reports" element={<Reports />} />
           <Route path="findings" element={<Findings />} />

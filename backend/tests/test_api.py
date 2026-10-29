@@ -8,7 +8,7 @@ async def test_requires_login(database):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as anon:
         assert (await anon.get("/api/transactions")).status_code == 401
         assert (await anon.post("/api/auth/login", json={"password": "wrong"})).status_code == 401
-        assert (await anon.get("/api/auth/me")).json() == {"authenticated": False}
+        assert (await anon.get("/api/auth/me")).json()["authenticated"] is False
 
 
 @pytest.fixture(scope="module")

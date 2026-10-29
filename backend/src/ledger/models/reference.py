@@ -54,6 +54,8 @@ class HouseholdMember(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(100), unique=True)
     initials: Mapped[str] = mapped_column(String(4))
     email: Mapped[str | None] = mapped_column(String(254))
+    # Allows signing in with the Google account that has this email (case-insensitive).
+    can_sign_in: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
 class CategoryGroup(TimestampMixin, Base):

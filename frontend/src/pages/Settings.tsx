@@ -124,8 +124,9 @@ export function Settings() {
             { key: 'name', label: 'Name', kind: 'text', required: true },
             { key: 'initials', label: 'Initials', kind: 'text', required: true, width: 90 },
             { key: 'email', label: 'Email', kind: 'text' },
+            { key: 'can_sign_in', label: 'Can sign in', kind: 'bool', width: 110 },
           ]}
-          defaults={{ name: '', initials: '', email: null }}
+          defaults={{ name: '', initials: '', email: null, can_sign_in: false }}
         />
       )}
       {tab === 'tags' && (

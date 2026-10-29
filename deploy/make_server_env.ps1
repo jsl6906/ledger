@@ -31,6 +31,9 @@ foreach ($k in "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD", "IMAP
     "MAIL_ALLOWED_SENDERS", "MAIL_INBOUND_ADDRESS") {
     if ($local.Contains($k)) { $lines += "$k=$($local[$k])" }
 }
+foreach ($k in "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET") {
+    if ($local.Contains($k)) { $lines += "$k=$($local[$k])" }
+}
 $lines += "APP_BASE_URL=$BaseUrl", "TZ=America/New_York"
 
 New-Item -ItemType Directory -Force "$share\secrets" | Out-Null

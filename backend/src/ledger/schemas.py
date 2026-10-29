@@ -81,7 +81,15 @@ class ValuationIn(BaseModel):
 class MemberIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     initials: str = Field(min_length=1, max_length=4)
-    email: str | None = None
+    email: str | None = Field(default=None, max_length=254)
+    can_sign_in: bool = False
+
+    @model_validator(mode="after")
+    def _sign_in_needs_email(self):
+        self.email = (self.email or "").strip() or None
+        if self.can_sign_in and not self.email:
+            raise ValueError("Signing in needs the email of the member's Google account")
+        return self
 
 
 class MemberOut(MemberIn, ORM):

@@ -64,7 +64,12 @@ export interface Account {
   id: number; name: string; institution_id: number | null; institution_name: string | null
   account_type: string; mask: string | null; is_hidden: boolean; is_closed: boolean; notes: string | null
 }
-export interface Member { id: number; name: string; initials: string; email: string | null }
+export interface Member { id: number; name: string; initials: string; email: string | null; can_sign_in: boolean }
+export interface Me {
+  authenticated: boolean
+  member: Pick<Member, 'id' | 'name' | 'initials'> | null  // set for a Google sign-in
+  google: boolean  // Google sign-in is configured
+}
 export interface CategoryGroup { id: number; name: string; type: CategoryType; sort_order: number; hide_from_reports: boolean }
 export interface Category {
   id: number; name: string; group_id: number; group_name: string; type: CategoryType; sort_order: number

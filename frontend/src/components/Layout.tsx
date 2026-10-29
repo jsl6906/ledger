@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { post } from '../api'
+import { post, type Me } from '../api'
 import { useAnomalies, useMembers } from '../hooks'
 import { Icon } from './ui'
 
@@ -19,7 +19,7 @@ const NAV = [
   { to: '/sources', icon: 'sources', label: 'Sources & backfill' },
 ]
 
-export function Layout({ onLogout }: { onLogout: () => void }) {
+export function Layout({ me, onLogout }: { me: Me['member']; onLogout: () => void }) {
   const members = useMembers()
   const openFindings = useAnomalies('open').data?.length
   const qc = useQueryClient()
@@ -61,7 +61,8 @@ export function Layout({ onLogout }: { onLogout: () => void }) {
           </NavLink>
           <div className="row" style={{ gap: 6 }}>
             {(members.data ?? []).map((m) => (
-              <span key={m.id} className="avatar" title={m.name}>{m.initials}</span>
+              <span key={m.id} className={`avatar${m.id === me?.id ? ' me' : ''}`}
+                title={m.id === me?.id ? `${m.name} (signed in)` : m.name}>{m.initials}</span>
             ))}
             <button className="btn btn-ghost small" onClick={logout} style={{ marginLeft: 'auto' }}>Sign out</button>
           </div>
