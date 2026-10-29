@@ -7,7 +7,7 @@ with the ledger: after a snapshot by the transactions since, and before the acco
 from it through the transactions in between (those points are marked estimated). Homes, vehicles, loans and mortgages
 move along a straight line between known values, a home's or vehicle's purchase price counting as one. Other accounts
 only carry snapshots forward. Every account joins the totals at its first known value; closed accounts drop out after
-their last balance or transaction.
+their last balance or transaction. Hidden accounts are left out altogether.
 """
 
 from bisect import bisect_right
@@ -86,7 +86,7 @@ def account_series(
 
 
 _ACCOUNTS = """--sql
-    SELECT id, name, account_type, is_closed, is_hidden FROM account ORDER BY name
+    SELECT id, name, account_type, is_closed FROM account WHERE NOT is_hidden ORDER BY name
 """
 _SNAPSHOTS = """--sql
     SELECT DISTINCT ON (account_id, as_of) account_id, as_of, balance, source FROM account_balance
@@ -131,7 +131,7 @@ def _iso_date(s: str | None) -> date | None:
 
 async def account_balances(session: AsyncSession, points: list[date]) -> list[dict]:
     """Each account's balance at the given dates (liabilities negative, so they add up to net worth), largest first;
-    accounts with no balance at any of them are left out."""
+    hidden accounts and accounts with no balance at any of them are left out."""
     accounts = {r.id: r for r in await session.execute(text(_ACCOUNTS))}
     snapshots = (await session.execute(text(_SNAPSHOTS))).all()
     # Statements fill in history before an account's feed starts; from then on the feed is the record.
@@ -160,6 +160,7 @@ async def account_balances(session: AsyncSession, points: list[date]) -> list[di
     # A home's or vehicle's purchase is a known value too, unless something was recorded that day.
     for r in await session.execute(text(_PURCHASES)):
         anchors.setdefault(r.account_id, {}).setdefault(r.purchase_date, r.purchase_price)
+    anchors = {i: v for i, v in anchors.items() if i in accounts}
     cash_ids = [i for i in anchors if accounts[i].account_type in CASH]
     flows: dict[int, list[tuple[date, Decimal]]] = {}
     if cash_ids:
@@ -186,7 +187,6 @@ async def account_balances(session: AsyncSession, points: list[date]) -> list[di
                 "account_type": a.account_type,
                 "liability": liability,
                 "is_closed": a.is_closed,
-                "is_hidden": a.is_hidden,
                 "values": [None if v is None else round(float(-abs(v) if liability else v), 2) for v, _ in vals],
                 "estimated": [e for _, e in vals],
             }

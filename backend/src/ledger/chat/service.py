@@ -27,8 +27,10 @@ v_transactions(id, date, posted_date, description, merchant, amount, category, c
   budget_spread_months, date_added, has_statement, account_hidden, internal_transfer, reportable)
   - amount is signed: negative = money out, positive = money in.
   - category_type is 'expense' | 'income' | 'transfer' | NULL (uncategorized).
-  - internal_transfer = a matched transfer between two visible accounts (both legs are flagged).
-  - reportable = NOT hidden_from_reports AND NOT account_hidden AND NOT internal_transfer.
+  - internal_transfer = a matched transfer between two accounts that aren't hidden (both legs are flagged).
+  - balance-only accounts (account_type investment, retirement, property, vehicle, loan, mortgage) are tracked by
+    balance; their own rows are not reportable, and transfers into or out of them are internal.
+  - reportable = NOT hidden_from_reports AND NOT account_hidden AND not a balance-only account AND NOT internal_transfer.
   - notes = all of the transaction's notes (see v_transaction_notes), oldest first, one per line; NULL if none.
 v_monthly_category(month, category, category_group, category_type, hidden_from_reports, net_amount, transactions,
   reportable)
@@ -41,6 +43,7 @@ v_statement_usage(statement_id, series, period_start, period_end, statement_date
 v_budgets(target, target_type, period_type, amount, notes)
 v_balances(account, account_type, institution, as_of, balance, available, source)
   - daily balance history from connected sources; latest per account = max(as_of). Credit cards/loans are debts.
+  - net worth leaves out hidden accounts (v_accounts.is_hidden) and closed accounts.
 v_holdings(account, as_of, symbol, description, shares, market_value, cost_basis, currency, source)
 v_transaction_notes(transaction_id, date, description, amount, account, note, source, document, created_at)
   - extra notes on a transaction (typed by hand, or details captured from imported statements); join to

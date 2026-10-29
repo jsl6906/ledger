@@ -5,14 +5,18 @@ days (the partner must be a transfer or uncategorized). Within one account, two 
 the same day also pair up (e.g. a card moving a promotional balance to standard purchases). Both rows point at each
 other via transfer_match_id.
 
-A matched pair between two visible (not hidden) accounts is an internal transfer: both legs are left out of transaction
+A matched pair between two accounts that aren't hidden is an internal transfer: both legs are left out of transaction
 lists, reports and category/merchant pages (account pages keep them). Transfers that are unmatched, or matched with a
-hidden account, show everywhere and count as income/expense by sign. Unmatched transfers in visible accounts are flagged
-as anomalies.
-Rows in hidden accounts are left out the same way; hidden accounts' balances still count toward net worth.
+hidden account, show everywhere and count as income/expense by sign. Unmatched transfers are flagged as anomalies, except
+in hidden and balance-only accounts, whose rows are out of reports anyway.
+
+Rows in hidden accounts and in balance-only accounts (investments, retirement, property, vehicles, loans, mortgages)
+are left out the same way. Hidden accounts are outside the household's books entirely: their balances don't count
+toward net worth either. Balance-only accounts are tracked by balance: they count toward net worth, and transfers with
+them stay internal.
 """
 
-from sqlalchemy import ColumnElement, and_, exists, text
+from sqlalchemy import ColumnElement, and_, exists, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -20,8 +24,14 @@ from ledger.models import Account, Transaction
 
 MATCH_WINDOW_DAYS = 7
 
-# For raw SQL where the transaction is aliased `t`.
-HIDDEN_ACCOUNT = "EXISTS (SELECT 1 FROM account xa WHERE xa.id = t.account_id AND xa.is_hidden)"
+# Accounts tracked by balance only: their own transactions (trades, dividends, valuations, interest) are left out by
+# default.
+BALANCE_ONLY_TYPES = ("investment", "retirement", "property", "vehicle", "loan", "mortgage")
+_BALANCE_ONLY_SQL = ", ".join(f"'{t}'" for t in BALANCE_ONLY_TYPES)
+
+# For raw SQL where the transaction is aliased `t`: the row's account keeps its transactions out of view by default.
+HIDDEN_ACCOUNT = f"""EXISTS (SELECT 1 FROM account xa WHERE xa.id = t.account_id
+    AND (xa.is_hidden OR xa.account_type IN ({_BALANCE_ONLY_SQL})))"""
 INTERNAL_TRANSFER = """(
     t.transfer_match_id IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM account ha WHERE ha.id = t.account_id AND ha.is_hidden)
@@ -49,7 +59,9 @@ def internal_transfer() -> ColumnElement[bool]:
 
 def hidden_account() -> ColumnElement[bool]:
     """ORM form of HIDDEN_ACCOUNT."""
-    return exists().where(Account.id == Transaction.account_id, Account.is_hidden)
+    return exists().where(
+        Account.id == Transaction.account_id, or_(Account.is_hidden, Account.account_type.in_(BALANCE_ONLY_TYPES))
+    )
 
 
 _CANDIDATES = text(

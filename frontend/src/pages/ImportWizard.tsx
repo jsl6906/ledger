@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  IMPORT_FIELDS, del, get, post, type BatchDetail, type ImportDefaults, type ImportField, type ImportOptions,
+  IMPORT_FIELDS, del, get, post, shownAccounts, type BatchDetail, type ImportDefaults, type ImportField, type ImportOptions,
   type ImportPair, type ImportRow, type StatementAccount,
 } from '../api'
 import { CategorySelect } from '../components/CategorySelect'
@@ -424,7 +424,7 @@ function AccountSelect({ value, empty, onChange }: { value: number | null; empty
   return (
     <select className="input" value={value ?? ''} onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}>
       <option value="">{empty}</option>
-      {(accounts.data ?? []).map((a) => (
+      {shownAccounts(accounts.data, value).map((a) => (
         <option key={a.id} value={a.id}>{a.name}{a.institution_name ? ` · ${a.institution_name}` : ''}{a.mask ? ` ···${a.mask}` : ''}</option>
       ))}
     </select>

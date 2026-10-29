@@ -1,8 +1,8 @@
 """Per-entity analytics for the detail pages (merchant, account, category, category group).
 
 Detail pages show everything booked against the entity, including transfers and hidden categories; only deleted rows and
-(except on account pages) hidden accounts' rows and internal transfers are excluded. Amounts: `spent` = money out
-(positive), `received` = money in, `net` = signed sum.
+(except on account pages) hidden and balance-only accounts' rows and internal transfers are excluded. Amounts:
+`spent` = money out (positive), `received` = money in, `net` = signed sum.
 """
 
 from datetime import date, timedelta

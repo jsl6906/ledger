@@ -72,7 +72,9 @@ async def summary(start: date = Query(...), end: date = Query(...), session: Asy
     """
     row = (await session.execute(text(sql), {"start": start, "end": end})).one()
     last_txn = await session.scalar(select(func.max(Transaction.txn_date)).where(live))
-    accounts = await session.scalar(select(func.count()).select_from(Account).where(Account.is_closed.is_(False)))
+    accounts = await session.scalar(
+        select(func.count()).select_from(Account).where(Account.is_closed.is_(False), Account.is_hidden.is_(False))
+    )
     uncategorized_all = await session.scalar(select(func.count()).where(live, Transaction.category_id.is_(None)))
     return {
         "count": row.n,

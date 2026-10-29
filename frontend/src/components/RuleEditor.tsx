@@ -1,7 +1,7 @@
 import { useId, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { post, put, type CategoryRule, type RuleMatch, type RulePreview } from '../api'
+import { post, put, shownAccounts, type CategoryRule, type RuleMatch, type RulePreview } from '../api'
 import { money, shortDate } from '../format'
 import { useAccounts, useDebounced, useMerchantSearch } from '../hooks'
 import { txnPath } from '../links'
@@ -153,7 +153,7 @@ export function RuleEditor({
             <Field label="Account (optional)">
               <select className="input" value={d.account_id ?? ''} onChange={(e) => set('account_id', e.target.value ? Number(e.target.value) : null)}>
                 <option value="">Any account</option>
-                {(accounts.data ?? []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                {shownAccounts(accounts.data, d.account_id).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
             </Field>
             {amountFields}

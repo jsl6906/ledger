@@ -1,8 +1,8 @@
 """Reporting queries: cash flow, category breakdowns and trends, merchants.
 
-Reportable = not in a hidden account, not an internal transfer (matched pair between visible accounts) and not in a
-hidden category. Uncategorized rows and the remaining transfers (unmatched, or matched with a hidden account) count as
-income/expense by sign.
+Reportable = not in a hidden or balance-only account, not an internal transfer (matched pair between accounts that
+aren't hidden) and not in a hidden category. Uncategorized rows and the remaining transfers (unmatched, or matched
+with a hidden account) count as income/expense by sign.
 """
 
 from datetime import date
@@ -183,7 +183,7 @@ async def contributors(
     """Top merchants and largest transactions behind one aggregate (a bar, a segment, a month).
 
     basis "reports" applies the Reports filters (no transfers/hidden); "all" matches the detail pages; "budget" matches
-    budget actuals (only hidden accounts excluded). In ids/exclude, 0 stands for Uncategorized.
+    budget actuals (only hidden and balance-only accounts excluded). In ids/exclude, 0 stands for Uncategorized.
     """
     col = "coalesce(g.id, 0)" if level == "group" else "coalesce(c.id, 0)"
     visible = {"reports": REPORTABLE, "budget": f"t.deleted_at IS NULL AND NOT {HIDDEN_ACCOUNT}"}

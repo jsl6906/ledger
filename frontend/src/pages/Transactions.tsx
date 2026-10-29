@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
-import { get, post, type Job, type Transaction, type TransactionPage } from '../api'
+import { get, post, shownAccounts, type Job, type Transaction, type TransactionPage } from '../api'
 import { CategorySelect } from '../components/CategorySelect'
 import { AskPanel } from '../components/AskPanel'
 import { Button, DateInput, ErrorNote, ProgressBar, Seg, SortTh, TableCard } from '../components/ui'
@@ -167,7 +167,7 @@ export function Transactions() {
         <select className="input compact" value={accountId ?? ''}
           onChange={(e) => filter({ account: e.target.value || null })}>
           <option value="">All accounts</option>
-          {(accounts.data ?? []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          {shownAccounts(accounts.data, accountId, showHidden).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
         <CategorySelect className="input compact" value={categoryId} emptyLabel="All categories"
           onChange={(v) => filter({ category: v, categories: null, label: null })} />
@@ -187,7 +187,7 @@ export function Transactions() {
           </button>
         )}
         <label className="row small" style={{ gap: 6, cursor: 'pointer' }}
-          title="Hidden accounts' transactions and matched transfers between visible accounts are left out by default">
+          title="Transactions in hidden accounts and balance-only accounts (investments, retirement, property, vehicles, loans) and matched transfers between visible accounts are left out by default">
           <input type="checkbox" checked={showHidden} onChange={(e) => filter({ hidden: e.target.checked ? 1 : null })} />
           Show hidden & internal transfers
         </label>

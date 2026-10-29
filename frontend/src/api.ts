@@ -111,6 +111,13 @@ export interface Summary {
 export const ACCOUNT_TYPES = [
   'checking', 'savings', 'credit_card', 'loan', 'mortgage', 'investment', 'retirement', 'cash', 'property', 'vehicle', 'other',
 ]
+/** Accounts tracked by balance: their transactions stay out of lists and reports unless asked for. */
+export const BALANCE_ONLY_TYPES = ['investment', 'retirement', 'property', 'vehicle', 'loan', 'mortgage']
+
+/** Accounts to offer in pickers: hidden ones only when already chosen (`keep`) or asked for (`all`). */
+export function shownAccounts<A extends Pick<Account, 'id' | 'is_hidden'>>(accounts: A[] | undefined, keep?: number | null, all = false) {
+  return (accounts ?? []).filter((a) => all || !a.is_hidden || a.id === keep)
+}
 
 export async function upload<T>(path: string, file: File | null, fields: Record<string, string> = {}): Promise<T> {
   const fd = new FormData()
@@ -340,11 +347,11 @@ export interface CategoryRow {
   category_id: number | null; category: string; group_id: number | null; group: string; spent: number; income: number; count: number
 }
 export interface Trend { months: string[]; series: { id: number | null; name: string; total: number; values: number[] }[] }
-/** Month-end balances from /analytics/balances; liabilities are negative so accounts add up to net worth. */
+/** Month-end balances from /analytics/balances (hidden accounts left out); liabilities are negative so accounts add up to net worth. */
 export interface BalanceSeries {
   months: string[]; dates: string[]
   accounts: {
-    id: number; name: string; account_type: string; liability: boolean; is_closed: boolean; is_hidden: boolean
+    id: number; name: string; account_type: string; liability: boolean; is_closed: boolean
     values: (number | null)[]
     /** Rebuilt from transactions before the account's first known balance. */
     estimated: boolean[]

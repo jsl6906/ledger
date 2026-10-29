@@ -2,7 +2,7 @@ import { useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import {
-  del, get, patch, post, upload, type CategoryRule, type Statement, type Transaction, type TxnNote, type TxnPair, type TxnSource,
+  del, get, patch, post, shownAccounts, upload, type CategoryRule, type Statement, type Transaction, type TxnNote, type TxnPair, type TxnSource,
 } from '../api'
 import { CategorySelect } from '../components/CategorySelect'
 import { AskPanel } from '../components/AskPanel'
@@ -496,7 +496,7 @@ export function TransactionDetail({ txn, defaultAccountId, standalone = false, o
         <select className="input" value={draft.account_id ?? ''}
           onChange={(e) => set('account_id', e.target.value ? Number(e.target.value) : null)}>
           <option value="">—</option>
-          {(accounts.data ?? []).map((a) => (
+          {shownAccounts(accounts.data, draft.account_id).map((a) => (
             <option key={a.id} value={a.id}>{a.name}{a.institution_name ? ` · ${a.institution_name}` : ''}</option>
           ))}
         </select>

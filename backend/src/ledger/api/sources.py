@@ -203,12 +203,12 @@ async def sync_now(sid: int, full: bool = False, session: AsyncSession = Depends
 _LATEST_BALANCES = text(
     """--sql
     SELECT DISTINCT ON (b.account_id) b.account_id, a.name AS account, a.account_type, i.name AS institution,
-           a.is_hidden, a.is_closed, b.as_of, b.balance, b.available, b.source,
+           a.is_closed, b.as_of, b.balance, b.available, b.source,
            (SELECT p.balance FROM account_balance p
              WHERE p.account_id = b.account_id AND p.as_of <= b.as_of - 30
              ORDER BY p.as_of DESC LIMIT 1) AS balance_30d_ago
     FROM account_balance b
-    JOIN account a ON a.id = b.account_id
+    JOIN account a ON a.id = b.account_id AND NOT a.is_hidden
     LEFT JOIN institution i ON i.id = a.institution_id
     ORDER BY b.account_id, b.as_of DESC, b.created_at DESC
     """
@@ -221,6 +221,7 @@ def _f(v):
 
 @router.get("/balances")
 async def balances(session: AsyncSession = Depends(get_session)):
+    """Latest balance of every open account that isn't hidden, with net worth."""
     rows = [dict(r) for r in (await session.execute(_LATEST_BALANCES)).mappings() if not r["is_closed"]]
     for r in rows:
         for k in ("balance", "available", "balance_30d_ago"):

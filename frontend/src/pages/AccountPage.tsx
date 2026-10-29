@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from 'react-router-dom'
-import { get, put, type AccountDetail } from '../api'
+import { BALANCE_ONLY_TYPES, get, put, type AccountDetail } from '../api'
 import { CashflowChart, Legend } from '../components/Charts'
 import { LineChart } from '../components/LineChart'
 import { Breakdown, Findings, Kpis, RangeSeg, RenameCard, TxnList, YearTable } from '../components/Detail'
@@ -27,6 +27,7 @@ function AccountView({ id }: { id: number }) {
   })
   const qc = useQueryClient()
   const [renaming, setRenaming] = useState(false)
+  const [showTxns, setShowTxns] = useState(false)
   const rename = useMutation({
     mutationFn: (name: string) => {
       const { id: _id, institution_name: _i, sources: _s, ...rest } = q.data!.account
@@ -43,6 +44,9 @@ function AccountView({ id }: { id: number }) {
   const a = d.account
   const inRange = d.monthly.reduce((acc, m) => ({ in: acc.in + m.received, out: acc.out + m.spent, n: acc.n + m.count }), { in: 0, out: 0, n: 0 })
   const months = Math.max(1, d.monthly.length)
+  // Balance-only accounts (investments, property, loans…) are tracked by balance; their transactions are opt-in.
+  const balanceOnly = BALANCE_ONLY_TYPES.includes(a.account_type)
+  const txns = !balanceOnly || showTxns
 
   return (
     <section className="page">
@@ -54,13 +58,15 @@ function AccountView({ id }: { id: number }) {
             {a.institution_name && <span>{a.institution_name}</span>}
             {a.is_closed && <span className="tag tag-neutral">Closed</span>}
             {a.is_hidden && <span className="tag tag-neutral">Hidden</span>}
+            {balanceOnly && <span className="tag tag-neutral" title="Transactions are left out of lists and reports">Balance only</span>}
             {a.sources.map((s) => <span key={s} className="tag tag-accent">Synced · {s}</span>)}
             <span>{d.stats.count.toLocaleString()} transactions since {fullDate(d.stats.first_date)}</span>
           </div>
           {a.notes && <div className="small muted-2">{a.notes}</div>}
         </div>
         <div className="row">
-          <RangeSeg value={r.range} onChange={r.setRange} />
+          {txns && <RangeSeg value={r.range} onChange={r.setRange} />}
+          {balanceOnly && <Button onClick={() => setShowTxns(!showTxns)}>{showTxns ? 'Hide transactions' : 'Show transactions'}</Button>}
           <Button onClick={() => setRenaming(!renaming)}>Rename</Button>
         </div>
       </header>
@@ -73,9 +79,11 @@ function AccountView({ id }: { id: number }) {
       <Kpis items={[
         { k: 'Balance', v: d.balance ? money(d.balance.balance) : '—',
           m: d.balance ? `as of ${fullDate(d.balance.as_of)}${d.balance.available !== null ? ` · ${money(d.balance.available)} available` : ''}` : 'No balance data from sources' },
-        { k: 'Money in', v: money(inRange.in), m: `${money(inRange.in / months)}/mo · ${rangeLabel(d.start, d.end)}` },
-        { k: 'Money out', v: money(inRange.out), m: `${money(inRange.out / months)}/mo` },
-        { k: 'Net', v: money(inRange.in - inRange.out), m: `${inRange.n.toLocaleString()} transactions in range` },
+        ...(txns ? [
+          { k: 'Money in', v: money(inRange.in), m: `${money(inRange.in / months)}/mo · ${rangeLabel(d.start, d.end)}` },
+          { k: 'Money out', v: money(inRange.out), m: `${money(inRange.out / months)}/mo` },
+          { k: 'Net', v: money(inRange.in - inRange.out), m: `${inRange.n.toLocaleString()} transactions in range` },
+        ] : []),
       ]} />
 
       {d.balance_history.length > 1 && (
@@ -86,6 +94,7 @@ function AccountView({ id }: { id: number }) {
         </Card>
       )}
 
+      {txns && <>
       <Card>
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div><div className="card-kicker">Cash flow</div><div className="card-title">In vs out by month</div></div>
@@ -105,6 +114,7 @@ function AccountView({ id }: { id: number }) {
         <Breakdown kicker="Spending by category" rows={d.categories.filter((c) => c.spent > 0)} to={breakdownPath.category} value={(x) => x.spent} />
         <Breakdown kicker="Top merchants" rows={d.merchants.filter((m) => m.spent > 0)} to={(x) => merchantPath(String(x.id))} value={(x) => x.spent} />
       </div>
+      </>}
 
       {d.holdings.length > 0 && (
         <TableCard head={<div className="card-kicker" style={{ padding: 'var(--space-3) var(--space-3) 0' }}>Holdings · as of {fullDate(d.holdings[0].as_of)}</div>}>
@@ -129,10 +139,10 @@ function AccountView({ id }: { id: number }) {
         </TableCard>
       )}
 
-      <YearTable rows={d.yearly} show={['received', 'spent', 'net']} />
+      {txns && <YearTable rows={d.yearly} show={['received', 'spent', 'net']} />}
       <AccountStatements accountId={id} />
       <Findings params={{ account_id: id }} />
-      <TxnList params={{ account_id: id, start: r.start, include_hidden: 'true' }} month={r.month} onClearMonth={r.clearMonth} hide={['account']} />
+      {txns && <TxnList params={{ account_id: id, start: r.start, include_hidden: 'true' }} month={r.month} onClearMonth={r.clearMonth} hide={['account']} />}
     </section>
   )
 }

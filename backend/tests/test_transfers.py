@@ -113,3 +113,37 @@ async def test_transfer_matching(client, data):
     async with get_sessionmaker()() as session:
         res = await detect(session, date(2019, 2, 1))
     assert res["withdrawn"] == 1
+
+
+async def test_balance_only_accounts(client):
+    """Transfers with a balance-only account stay internal; its own rows stay out of lists and reports by default."""
+    from ledger.analytics.transfers import match_transfers
+    from ledger.db.engine import get_sessionmaker
+
+    checking = (await client.post("/api/accounts", json={"name": "BO Checking"})).json()
+    ira = (await client.post("/api/accounts", json={"name": "BO IRA", "account_type": "retirement"})).json()
+    transfer = {c["name"]: c for c in (await client.get("/api/categories")).json()}["Transfer"]["id"]
+
+    async def add(desc, amt, acct, cat=None):
+        body = {"txn_date": "2018-07-10", "description": desc, "amount": amt, "account_id": acct["id"], "category_id": cat}
+        r = await client.post("/api/transactions", json=body)
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    out = await add("BO CONTRIB 517", "-517.00", checking, transfer)
+    contrib = await add("BO CONTRIB IN 517", "517.00", ira, transfer)
+    dividend = await add("BO DIVIDEND 43", "43.00", ira)
+    async with get_sessionmaker()() as session:
+        await match_transfers(session)
+        await session.commit()
+
+    july = {"start": "2018-07-01", "end": "2018-07-31"}
+    flow = (await client.get("/api/analytics/cashflow", params=july)).json()[0]
+    assert flow["income"] == 0 and flow["expenses"] == 0
+    params = july | {"q": "BO ", "limit": 1000}
+    shown = {t["id"] for t in (await client.get("/api/transactions", params=params)).json()["items"]}
+    assert not shown & {out, contrib, dividend}
+    by_account = (await client.get("/api/transactions", params=params | {"account_id": ira["id"]})).json()["items"]
+    assert {t["id"] for t in by_account} == {dividend}
+    everything = (await client.get("/api/transactions", params=params | {"include_hidden": True})).json()["items"]
+    assert {out, contrib, dividend} <= {t["id"] for t in everything}

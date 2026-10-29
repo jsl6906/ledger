@@ -69,6 +69,8 @@ async def test_monthly_balances_endpoint(client):
     brk = await account("BL Brokerage", "investment")
     car = await account("BL Car Loan", "loan")
     ira = await account("BL IRA", "retirement")
+    r = await client.post("/api/accounts", json={"name": "BL Hidden", "account_type": "savings", "is_hidden": True})
+    hidden = r.json()["id"]
     for d, amt in (("2019-01-05", "1000.00"), ("2019-02-10", "-200.00"), ("2019-03-03", "-50.00")):
         await txn(chk, d, amt)
     await txn(sav, "2019-02-15", "25.00")
@@ -96,6 +98,7 @@ async def test_monthly_balances_endpoint(client):
     async with get_sessionmaker()() as s:
         snapshots = ((chk, date(2019, 3, 15), "1750"), (card, date(2019, 2, 20), "300"), (brk, date(2019, 3, 31), "10000"))
         snapshots += ((loan, date(2019, 1, 1), "-240000"), (loan, date(2019, 3, 1), "-230000"))
+        snapshots += ((hidden, date(2019, 1, 1), "50000"),)
         for acct, d, bal in snapshots:
             s.add(AccountBalance(account_id=acct, as_of=d, balance=D(bal), source="manual"))
         # The IRA's feed starts mid-March; balances read off statements only count before that.
@@ -157,6 +160,11 @@ async def test_monthly_balances_endpoint(client):
     assert rows[loan]["values"] == pytest.approx([None, -240000 + 10000 * 30 / 59, -240000 + 10000 * 58 / 59, None, None])
     assert rows[car]["values"] == pytest.approx([None, -12000, -(12000 - 1000 * 28 / 59), -11000, -11000], abs=0.01)
     assert rows[ira]["values"] == [None, 8000.0, 8500.0, 9000.0, 9000.0]
+    # Hidden accounts stay out of net worth and the balance lists.
+    assert hidden not in rows
+    latest = (await client.get("/api/balances")).json()
+    assert hidden not in {a["account_id"] for a in latest["accounts"]}
+    assert str(hidden) not in (await client.get("/api/balances/trend")).json()
 
     def total(pick):
         return [round(sum(a["values"][i] or 0 for a in out["accounts"] if pick(a)), 2) for i in range(5)]

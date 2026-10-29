@@ -12,6 +12,7 @@ from decimal import ROUND_CEILING, Decimal
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger.analytics.transfers import HIDDEN_ACCOUNT
 from ledger.models import Budget, Category, CategoryGroup, SpreadRule
 from ledger.models.budgets import PERIOD_MONTHS
 
@@ -59,7 +60,7 @@ def period_for(kind: str, on: date) -> Period:
 
 
 _SPREAD_ACTUALS = text(
-    """--sql
+    f"""--sql
     WITH tx AS (
         SELECT t.category_id, t.amount,
                CAST(date_trunc('month', t.txn_date) AS date) AS m0,
@@ -74,7 +75,7 @@ _SPREAD_ACTUALS = text(
         FROM "transaction" t
         WHERE t.deleted_at IS NULL
           AND t.category_id IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM account xa WHERE xa.id = t.account_id AND xa.is_hidden)
+          AND NOT {HIDDEN_ACCOUNT}
           AND t.txn_date >= CAST(:start AS date) - interval '60 months'
           AND t.txn_date < date_trunc('year', CAST(:end AS date)) + interval '1 year'
     ),
@@ -106,13 +107,13 @@ async def actuals(session: AsyncSession, start: date, end: date) -> dict[int, tu
 
 
 _CHARGES = text(
-    """--sql
+    f"""--sql
     SELECT t.category_id, CAST(date_trunc('month', t.txn_date) AS date) AS month,
            count(*) AS n, sum(abs(t.amount)) AS total
     FROM "transaction" t
     JOIN category c ON c.id = t.category_id
     WHERE t.deleted_at IS NULL
-      AND NOT EXISTS (SELECT 1 FROM account xa WHERE xa.id = t.account_id AND xa.is_hidden)
+      AND NOT {HIDDEN_ACCOUNT}
       AND CASE WHEN c.type = 'income' THEN t.amount > 0 ELSE t.amount < 0 END
       AND t.txn_date BETWEEN :start AND :end
     GROUP BY 1, 2
