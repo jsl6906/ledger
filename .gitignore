@@ -17,3 +17,4 @@ frontend/dist/
 /deploy/deploy_instructions.md
 /backend/scripts/private/
 /backend/scripts/_tmp*.py
+/scripts/private/

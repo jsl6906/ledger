@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ledger.alerts.service import large_txn_threshold
 from ledger.analytics.reports import FROM, REPORTABLE, monthly_category_history
-from ledger.analytics.transfers import MATCH_WINDOW_DAYS, match_transfers
+from ledger.analytics.transfers import HIDDEN_ACCOUNT, MATCH_WINDOW_DAYS, match_transfers
 from ledger.budgets.service import add_months
 from ledger.config import get_settings
 from ledger.models import Anomaly, Category, Statement, StatementSeries
@@ -192,8 +192,9 @@ async def _bill_increases(session: AsyncSession, month: date) -> list[dict]:
     return out
 
 
+# Hidden accounts are out of reports, so a lone leg there (e.g. a mortgage mirroring a checking expense) is harmless.
 _UNMATCHED_TRANSFERS = text(
-    """--sql
+    f"""--sql
     SELECT t.id, t.txn_date, t.description, t.amount, t.category_id, acc.name AS account,
            p.txn_date AS p_date, p.account AS p_account, p.category AS p_category
     FROM "transaction" t
@@ -209,7 +210,7 @@ _UNMATCHED_TRANSFERS = text(
           AND abs(b.txn_date - t.txn_date) <= CAST(:window AS integer)
         ORDER BY abs(b.txn_date - t.txn_date), b.id LIMIT 1
     ) p ON true
-    WHERE t.deleted_at IS NULL AND t.transfer_match_id IS NULL AND t.amount <> 0
+    WHERE t.deleted_at IS NULL AND t.transfer_match_id IS NULL AND t.amount <> 0 AND NOT {HIDDEN_ACCOUNT}
       AND t.txn_date BETWEEN :start AND :end AND t.txn_date <= :settled
     """
 )

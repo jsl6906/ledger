@@ -34,6 +34,8 @@ async def data(client):
         "in_hidden": await add("2019-02-12", "TT IN HIDDEN 205", "205.00", hidden),
         "promo_out": await add("2019-02-14", "TT PROMO MOVED 88", "-88.00", checking, transfer),
         "promo_in": await add("2019-02-14", "TT PROMO ENDED 88", "88.00", checking, transfer),
+        "hidden_lone": await add("2019-02-17", "TT HIDDEN LOAN PMT 947", "947.00", hidden, transfer),
+        "hidden_lone_src": await add("2019-02-18", "TT LOAN PMT 947", "-947.00", checking, misc["id"]),
     }
     return rows
 
@@ -87,7 +89,7 @@ async def test_transfer_matching(client, data):
     async with get_sessionmaker()() as session:
         sql = text("SELECT id, reportable FROM v_transactions WHERE id = ANY(:ids)")
         reportable = dict((await session.execute(sql, {"ids": ids})).all())
-    assert {i for i, r in reportable.items() if not r} == internal | {d["in_hidden"]}
+    assert {i for i, r in reportable.items() if not r} == internal | {d["in_hidden"], d["hidden_lone"]}
 
     flagged = [
         a
@@ -99,6 +101,7 @@ async def test_transfer_matching(client, data):
     assert data["hint"]["id"] in by_id and "TT Misc" in by_id[data["hint"]["id"]]["detail"]
     assert data["dup_b"]["id"] not in by_id  # closest-date leg wins
     assert data["dup_a"]["id"] in by_id
+    assert data["hidden_lone"]["id"] not in by_id  # hidden accounts are out of reports anyway
     for k in ("out1", "in1", "out2", "in2"):
         assert data[k]["id"] not in by_id
     assert len(by_id) == 3

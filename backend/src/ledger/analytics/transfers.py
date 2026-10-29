@@ -7,7 +7,8 @@ other via transfer_match_id.
 
 A matched pair between two visible (not hidden) accounts is an internal transfer: both legs are left out of transaction
 lists, reports and category/merchant pages (account pages keep them). Transfers that are unmatched, or matched with a
-hidden account, show everywhere and count as income/expense by sign. Unmatched transfers are flagged as anomalies.
+hidden account, show everywhere and count as income/expense by sign. Unmatched transfers in visible accounts are flagged
+as anomalies.
 Rows in hidden accounts are left out the same way; hidden accounts' balances still count toward net worth.
 """
 
