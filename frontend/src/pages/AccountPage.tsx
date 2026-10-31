@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from 'react-router-dom'
-import { BALANCE_ONLY_TYPES, get, put, type AccountDetail } from '../api'
+import { BALANCE_ONLY_TYPES, get, put, type AccountDetail, type BalanceAnchor, type BalancePoint } from '../api'
 import { CashflowChart, Legend } from '../components/Charts'
 import { LineChart } from '../components/LineChart'
 import { Breakdown, Findings, Kpis, RangeSeg, RenameCard, TxnList, YearTable } from '../components/Detail'
@@ -22,6 +22,33 @@ function historyNote(type: string) {
   if (type === 'checking' || type === 'savings') return 'Follows the transactions from each recorded balance or statement.'
   if (['property', 'vehicle', 'loan', 'mortgage'].includes(type)) return 'Straight lines between recorded values, statements and the purchase price.'
   return 'Each recorded balance is held until the next.'
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  tiller: 'Tiller balance', simplefin: 'SimpleFIN balance', manual: 'Balance entered by hand', rentcast: 'RentCast estimate',
+  depreciation: 'Depreciation estimate', statement: 'Statement closing balance', purchase: 'Purchase price',
+}
+
+/** "Statement closing balance (···5413)" */
+function sourceLabel(a: BalanceAnchor) {
+  const refs = a.refs.length ? ` (${a.refs.map((r) => `···${r}`).join(' + ')})` : ''
+  return `${SOURCE_LABELS[a.source] ?? `${a.source} balance`}${refs}`
+}
+
+/** "Statement closing balance (···5413) of $8,000.00 on 31 Jan 2019" */
+function anchorLabel(a: BalanceAnchor) {
+  return `${sourceLabel(a)} of ${money(a.balance)} on ${fullDate(a.as_of)}`
+}
+
+/** Hover text for a balance point: its value, then where that value came from. */
+function pointTitle(b: BalancePoint) {
+  const { kind, from, to } = b.basis
+  const how = kind === 'recorded' ? sourceLabel(from)
+    : kind === 'held' ? `Held from the ${anchorLabel(from)}`
+    : kind === 'ledger' ? `${anchorLabel(from)}, plus transactions since`
+    : kind === 'between' && to ? `Straight line from the ${anchorLabel(from)}\nto the ${anchorLabel(to)}`
+    : `Estimated: worked back through transactions from the ${anchorLabel(from)}`
+  return `${fullDate(b.as_of)}: ${money(b.balance)}\n${how}`
 }
 
 function AccountView({ id }: { id: number }) {
@@ -98,11 +125,12 @@ function AccountView({ id }: { id: number }) {
         {d.balance_history.length > 1 ? <>
           <LineChart points={d.balance_history.map((b) => ({
             label: shortDate(b.as_of), value: b.balance,
-            title: `${fullDate(b.as_of)}: ${money(b.balance)}${b.estimated ? ' (estimated from transactions)' : ''}`,
-          }))} format={(v) => money(v)} fit width={960} />
+            title: pointTitle(b),
+          }))} format={(v) => money(v)} fit extremes width={960} />
           <div className="card-meta">
             {historyNote(a.account_type)}
             {d.balance_history.some((b) => b.estimated) && ' Points before the first recorded balance are estimated from transactions.'}
+            {' Hover a point to see where its balance came from.'}
           </div>
         </> : (
           <div className="text-muted small">

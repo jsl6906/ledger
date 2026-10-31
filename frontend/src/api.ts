@@ -409,6 +409,13 @@ export interface MerchantDetail extends EntityDetail {
   latest_description: string; charges: Charge[]; cadence: Cadence | null; categories: BreakdownRow[]; accounts: BreakdownRow[]
   rule: { id: number; category_id: number; category_name: string; source: string } | null
 }
+/** A known balance a history point is worked out from: an account_balance source (tiller, simplefin, manual, rentcast,
+ * depreciation, statement), a statement closing ("statement", with the statement accounts' last four) or "purchase". */
+export interface BalanceAnchor { as_of: string; balance: number; source: string; refs: string[] }
+export interface BalancePoint {
+  as_of: string; balance: number; estimated: boolean
+  basis: { kind: 'recorded' | 'held' | 'ledger' | 'between' | 'estimated'; from: BalanceAnchor; to: BalanceAnchor | null }
+}
 export interface AccountDetail extends EntityDetail {
   account: {
     id: number; name: string; institution_id: number | null; institution_name: string | null; account_type: string; liability: boolean
@@ -416,7 +423,7 @@ export interface AccountDetail extends EntityDetail {
   }
   balance: { as_of: string; balance: number; available: number | null; source: string } | null
   /** Derived like the Reports balance charts; liabilities as positive amounts owed. */
-  balance_history: { as_of: string; balance: number; estimated: boolean }[]
+  balance_history: BalancePoint[]
   holdings: { symbol: string | null; description: string | null; shares: number | null; market_value: number | null; cost_basis: number | null; as_of: string }[]
   categories: BreakdownRow[]; merchants: BreakdownRow[]
 }

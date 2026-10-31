@@ -168,15 +168,39 @@ async def test_monthly_balances_endpoint(client):
         return r.json()["balance_history"]
 
     h = await history(chk, start="2018-12-01", end="2019-04-30")
-    assert h[0] == {"as_of": "2019-01-08", "balance": 2000.0, "estimated": True}
-    assert h[-1] == {"as_of": "2019-04-30", "balance": 1750.0, "estimated": False}
+    snap = {"as_of": "2019-03-15", "balance": 1750.0, "source": "manual", "refs": []}
+    assert h[0] == {
+        "as_of": "2019-01-08",
+        "balance": 2000.0,
+        "estimated": True,
+        "basis": {"kind": "estimated", "from": snap, "to": None},
+    }
+    assert h[-1] == {
+        "as_of": "2019-04-30",
+        "balance": 1750.0,
+        "estimated": False,
+        "basis": {"kind": "ledger", "from": snap, "to": None},
+    }
     assert {b["as_of"] for b in h} >= {"2019-03-12", "2019-03-19"} and len(h) == 17
     # All time runs at month ends from the first known value, which can predate the range of its transactions.
     h = await history(home)
     assert h[0]["as_of"] == "2019-01-31" and h[-1]["as_of"] == "2019-02-28"
+    assert h[0]["basis"]["kind"] == "between" and h[0]["basis"]["from"]["source"] == "purchase"
     # Amounts owed are positive here; a closed loan stops at its last balance.
     h = await history(loan, start="2018-12-01", end="2019-04-30")
-    assert h[0] == {"as_of": "2019-01-01", "balance": 240000.0, "estimated": False} and h[-1]["as_of"] == "2019-02-26"
+    assert h[0]["balance"] == 240000.0 and h[0]["basis"]["kind"] == "recorded" and h[-1]["as_of"] == "2019-02-26"
+    assert h[1]["basis"] == {
+        "kind": "between",
+        "from": {"as_of": "2019-01-01", "balance": 240000.0, "source": "manual", "refs": []},
+        "to": {"as_of": "2019-03-01", "balance": 230000.0, "source": "manual", "refs": []},
+    }
+    # Each point names what it's held from: statement closings with the statement account, then the feed.
+    h = await history(ira, start="2019-01-01", end="2019-03-31")
+    assert [(b["as_of"], b["basis"]["kind"], b["basis"]["from"]["source"], b["basis"]["from"]["refs"]) for b in h[::4]] == [
+        ("2019-02-03", "held", "statement", ["5413"]),
+        ("2019-03-03", "held", "statement", []),
+        ("2019-03-31", "held", "tiller", []),
+    ]
     # Hidden accounts still get their own history.
     assert {b["balance"] for b in await history(hidden, start="2019-01-01", end="2019-02-28")} == {50000.0}
 

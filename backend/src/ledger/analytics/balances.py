@@ -51,8 +51,26 @@ def account_series(
     """(balance, estimated) at each point. `anchors`/`flows` are sorted by date, one entry per date; `flows` (net
     transaction amount per day) is given for accounts whose balance follows the ledger; `until` ends a closed account;
     `interpolate` draws a straight line between anchors instead of holding each until the next."""
+    return [(v, e) for v, e, _ in explained_series(points, anchors, flows, until, interpolate)]
+
+
+# How a point's balance was worked out from the anchors (see explained_series).
+Basis = tuple[str, int, int | None] | None
+
+
+def explained_series(
+    points: list[date],
+    anchors: list[tuple[date, Decimal]],
+    flows: list[tuple[date, Decimal]] | None = None,
+    until: date | None = None,
+    interpolate: bool = False,
+) -> list[tuple[Decimal | None, bool, Basis]]:
+    """account_series with how each point was worked out: (kind, anchor index, next anchor index), the kind being
+    "recorded" (an anchor on that day), "held" (the last anchor carried forward), "ledger" (the last anchor plus the
+    transactions since), "between" (a straight line from one anchor to the next) or "estimated" (worked back from the
+    first anchor through the transactions in between); None where there's no balance."""
     if not anchors:
-        return [(None, False)] * len(points)
+        return [(None, False, None)] * len(points)
     a_dates = [d for d, _ in anchors]
     f_dates = [d for d, _ in flows or []]
     cum: list[Decimal] = []
@@ -65,23 +83,26 @@ def account_series(
         i = bisect_right(f_dates, d)
         return cum[i - 1] if i else Decimal(0)
 
-    out: list[tuple[Decimal | None, bool]] = []
+    out: list[tuple[Decimal | None, bool, Basis]] = []
     for p in points:
         if until is not None and p > until:
-            out.append((None, False))
+            out.append((None, False, None))
             continue
         i = bisect_right(a_dates, p)
+        on_anchor = bool(i) and a_dates[i - 1] == p
         if i and interpolate and i < len(anchors):
             (d0, v0), (d1, v1) = anchors[i - 1], anchors[i]
-            out.append((v0 + (v1 - v0) * Decimal((p - d0).days) / Decimal((d1 - d0).days), False))
+            basis = ("recorded", i - 1, None) if on_anchor else ("between", i - 1, i)
+            out.append((v0 + (v1 - v0) * Decimal((p - d0).days) / Decimal((d1 - d0).days), False, basis))
         elif i:
             as_of, bal = anchors[i - 1]
-            out.append((bal + through(p) - through(as_of) if flows else bal, False))
+            kind = "recorded" if on_anchor else "ledger" if flows else "held"
+            out.append((bal + through(p) - through(as_of) if flows else bal, False, (kind, i - 1, None)))
         elif flows and f_dates[0] <= p:
             as_of, bal = anchors[0]
-            out.append((bal - (through(as_of) - through(p)), True))
+            out.append((bal - (through(as_of) - through(p)), True, ("estimated", 0, None)))
         else:
-            out.append((None, False))
+            out.append((None, False, None))
     return out
 
 
@@ -98,7 +119,7 @@ _SNAPSHOTS = """--sql
 # opening balance. Loan, mortgage and investment rows can't confirm a balance (interest, market moves), so whether
 # theirs reconciled says nothing about the balance and every one counts. Credit card statements are left out.
 _STATEMENT_CLOSINGS = """--sql
-    SELECT sc.account_id, sc.import_batch_id, b.doc_meta->>'period_end' AS period_end,
+    SELECT sc.account_id, sc.import_batch_id, sc.account_ref, b.doc_meta->>'period_end' AS period_end,
            CASE WHEN sc.account_ref = '' THEN b.doc_meta->>'closing_balance'
                 ELSE (SELECT x->>'closing_balance'
                       FROM jsonb_array_elements(coalesce(b.doc_meta->'accounts', '[]'::jsonb)) x
@@ -131,8 +152,10 @@ def _iso_date(s: str | None) -> date | None:
 
 
 async def _account_inputs(session: AsyncSession, account_id: int | None = None) -> list[tuple]:
-    """(account, anchors, flows, until) as account_series takes them, liabilities in amounts owed, for every account
-    that isn't hidden and has a known value, or only the one asked for, hidden or not."""
+    """(account, anchors, flows, until, origins) for every account that isn't hidden and has a known value, or only the
+    one asked for, hidden or not. The first four are as account_series takes them, liabilities in amounts owed; origins
+    says where each anchor came from: {"source": account_balance source | "statement" | "purchase", "refs": the
+    statement accounts a closing was read from (last four), else []}."""
 
     def q(sql: str, column: str, everyone: str = "true") -> tuple:
         if account_id is None:
@@ -150,23 +173,27 @@ async def _account_inputs(session: AsyncSession, account_id: int | None = None) 
     def before_feed(aid: int, d: date) -> bool:
         return aid not in feed_start or d < feed_start[aid]
 
-    closings: dict[tuple[int, int], tuple[date, Decimal]] = {}
+    closings: dict[tuple[int, int], tuple[date, Decimal, list[str]]] = {}
     for r in await session.execute(*q(_STATEMENT_CLOSINGS, "sc.account_id")):
         as_of = _iso_date(r.period_end)
         if as_of is None or r.balance is None or not before_feed(r.account_id, as_of):
             continue
-        _, so_far = closings.get((r.account_id, r.import_batch_id), (as_of, Decimal(0)))
-        closings[(r.account_id, r.import_batch_id)] = (as_of, so_far + Decimal(r.balance))
-    anchors: dict[int, dict[date, Decimal]] = {}
-    for (aid, _), (as_of, balance) in closings.items():
-        anchors.setdefault(aid, {})[as_of] = balance
+        _, so_far, refs = closings.get((r.account_id, r.import_batch_id), (as_of, Decimal(0), []))
+        refs = [*refs, r.account_ref[-4:]] if r.account_ref else refs
+        closings[(r.account_id, r.import_batch_id)] = (as_of, so_far + Decimal(r.balance), refs)
+    # account -> day -> (balance, origin)
+    anchors: dict[int, dict[date, tuple[Decimal, dict]]] = {}
+    for (aid, _), (as_of, balance, refs) in closings.items():
+        anchors.setdefault(aid, {})[as_of] = (balance, {"source": "statement", "refs": refs})
     # Feed and manual snapshots win over a statement closing on the same day.
     for r in snapshots:
         if r.source != "statement" or before_feed(r.account_id, r.as_of):
-            anchors.setdefault(r.account_id, {})[r.as_of] = r.balance
+            anchors.setdefault(r.account_id, {})[r.as_of] = (r.balance, {"source": r.source, "refs": []})
     # A home's or vehicle's purchase is a known value too, unless something was recorded that day.
     for r in await session.execute(*q(_PURCHASES, "account_id")):
-        anchors.setdefault(r.account_id, {}).setdefault(r.purchase_date, r.purchase_price)
+        anchors.setdefault(r.account_id, {}).setdefault(
+            r.purchase_date, (r.purchase_price, {"source": "purchase", "refs": []})
+        )
     anchors = {i: v for i, v in anchors.items() if i in accounts}
     cash_ids = [i for i in anchors if accounts[i].account_type in CASH]
     flows: dict[int, list[tuple[date, Decimal]]] = {}
@@ -177,13 +204,14 @@ async def _account_inputs(session: AsyncSession, account_id: int | None = None) 
     out = []
     for aid, by_date in anchors.items():
         a = accounts[aid]
+        days = sorted(by_date)
         # Sources disagree on the sign of what's owed; work in amounts owed so lines between them stay straight.
-        series = sorted((d, abs(v) if a.account_type in LIABILITIES else v) for d, v in by_date.items())
+        series = [(d, abs(by_date[d][0]) if a.account_type in LIABILITIES else by_date[d][0]) for d in days]
         own = flows.get(aid) if a.account_type in CASH else None
         until = None
         if a.is_closed:
             until = max(series[-1][0], own[-1][0]) if own else series[-1][0]
-        out.append((a, series, own, until))
+        out.append((a, series, own, until, [by_date[d][1] for d in days]))
     return out
 
 
@@ -191,7 +219,7 @@ async def account_balances(session: AsyncSession, points: list[date]) -> list[di
     """Each account's balance at the given dates (liabilities negative, so they add up to net worth), largest first;
     hidden accounts and accounts with no balance at any of them are left out."""
     rows = []
-    for a, series, own, until in await _account_inputs(session):
+    for a, series, own, until, _ in await _account_inputs(session):
         liability = a.account_type in LIABILITIES
         vals = account_series(points, series, own, until, a.account_type in INTERPOLATED)
         if all(v is None for v, _ in vals):
@@ -215,11 +243,13 @@ async def account_history(
     session: AsyncSession, account_id: int, start: date | None, end: date, today: date | None = None
 ) -> list[dict]:
     """One account's balance from start (or its first known value) to end, worked out as account_balances does: weekly
-    over two years or less, at month ends beyond that. Liabilities come as positive amounts owed."""
+    over two years or less, at month ends beyond that. Liabilities come as positive amounts owed. Each point says how it
+    was worked out: basis = {"kind": see explained_series, "from": the anchor it starts from, "to": the anchor a
+    "between" line runs to}, anchors given as {"as_of", "balance", "source", "refs"}."""
     inputs = await _account_inputs(session, account_id)
     if not inputs:
         return []
-    a, series, own, until = inputs[0]
+    a, series, own, until, origins = inputs[0]
     end = min(end, today or date.today())
     first = min(series[0][0], own[0][0]) if own else series[0][0]
     start = max(start or first, first)
@@ -229,11 +259,22 @@ async def account_history(
         points = [end - timedelta(days=7 * k) for k in range((end - start).days // 7, -1, -1)]
     else:
         points = month_points(start, end, end)
-    vals = account_series(points, series, own, until, a.account_type in INTERPOLATED)
+    vals = explained_series(points, series, own, until, a.account_type in INTERPOLATED)
+
+    def anchor(i: int | None) -> dict | None:
+        if i is None:
+            return None
+        return {"as_of": series[i][0], "balance": round(float(series[i][1]), 2), **origins[i]}
+
     return [
-        {"as_of": p, "balance": round(float(v), 2), "estimated": e}
-        for p, (v, e) in zip(points, vals, strict=True)
-        if v is not None
+        {
+            "as_of": p,
+            "balance": round(float(v), 2),
+            "estimated": e,
+            "basis": {"kind": basis[0], "from": anchor(basis[1]), "to": anchor(basis[2])},
+        }
+        for p, (v, e, basis) in zip(points, vals, strict=True)
+        if v is not None and basis is not None
     ]
 
 
