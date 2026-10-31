@@ -17,6 +17,13 @@ export function AccountPage() {
   return <AccountView key={id} id={id} />
 }
 
+/** How the balance line is drawn, matching the Reports balance charts. */
+function historyNote(type: string) {
+  if (type === 'checking' || type === 'savings') return 'Follows the transactions from each recorded balance or statement.'
+  if (['property', 'vehicle', 'loan', 'mortgage'].includes(type)) return 'Straight lines between recorded values, statements and the purchase price.'
+  return 'Each recorded balance is held until the next.'
+}
+
 function AccountView({ id }: { id: number }) {
   const r = useDetailRange('12m')
   const hs = useUrlSort({ symbol: 'asc', description: 'asc', shares: 'desc', value: 'desc', gain: 'desc' }, null, 'hsort')
@@ -30,7 +37,7 @@ function AccountView({ id }: { id: number }) {
   const [showTxns, setShowTxns] = useState(false)
   const rename = useMutation({
     mutationFn: (name: string) => {
-      const { id: _id, institution_name: _i, sources: _s, ...rest } = q.data!.account
+      const { id: _id, institution_name: _i, sources: _s, liability: _l, ...rest } = q.data!.account
       return put(`/accounts/${id}`, { ...rest, name })
     },
     onSuccess: () => {
@@ -65,7 +72,7 @@ function AccountView({ id }: { id: number }) {
           {a.notes && <div className="small muted-2">{a.notes}</div>}
         </div>
         <div className="row">
-          {txns && <RangeSeg value={r.range} onChange={r.setRange} />}
+          <RangeSeg value={r.range} onChange={r.setRange} />
           {balanceOnly && <Button onClick={() => setShowTxns(!showTxns)}>{showTxns ? 'Hide transactions' : 'Show transactions'}</Button>}
           <Button onClick={() => setRenaming(!renaming)}>Rename</Button>
         </div>
@@ -86,16 +93,28 @@ function AccountView({ id }: { id: number }) {
         ] : []),
       ]} />
 
-      {d.balance_history.length > 1 && (
-        <Card>
-          <div className="card-kicker">Balance history</div>
-          <LineChart points={d.balance_history.map((b) => ({ label: shortDate(b.as_of), value: b.balance, title: `${fullDate(b.as_of)}: ${money(b.balance)}` }))}
-            format={(v) => money(v)} fit width={960} />
-        </Card>
-      )}
+      <Card>
+        <div><div className="card-kicker">Balance</div><div className="card-title">{a.liability ? 'Amount owed over time' : 'Balance over time'}</div></div>
+        {d.balance_history.length > 1 ? <>
+          <LineChart points={d.balance_history.map((b) => ({
+            label: shortDate(b.as_of), value: b.balance,
+            title: `${fullDate(b.as_of)}: ${money(b.balance)}${b.estimated ? ' (estimated from transactions)' : ''}`,
+          }))} format={(v) => money(v)} fit width={960} />
+          <div className="card-meta">
+            {historyNote(a.account_type)}
+            {d.balance_history.some((b) => b.estimated) && ' Points before the first recorded balance are estimated from transactions.'}
+          </div>
+        </> : (
+          <div className="text-muted small">
+            {d.balance_history.length ? `Only one balance known so far (${money(d.balance_history[0].balance)} on ${fullDate(d.balance_history[0].as_of)}).`
+              : 'No balances for this account in this range. They come from synced sources, statements, or recorded valuations.'}
+          </div>
+        )}
+      </Card>
 
       {txns && <>
-      <Card>
+      {/* Balance-only accounts move by valuations and interest, so in vs out says little; the balance chart covers them. */}
+      {!balanceOnly && <Card>
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div><div className="card-kicker">Cash flow</div><div className="card-title">In vs out by month</div></div>
           <Legend items={[{ label: 'In', color: 'var(--color-accent-300)' }, { label: 'Out', color: 'var(--color-accent-700)' }]} />
@@ -108,7 +127,7 @@ function AccountView({ id }: { id: number }) {
               contrib: { start: m, end: monthEnd(m), basis: 'all', account_id: id } }
           }} />
         <div className="card-meta">Includes transfers. Hover a month for its top merchants; click to filter the transactions below.</div>
-      </Card>
+      </Card>}
 
       <div className="grid-2" style={{ alignItems: 'start' }}>
         <Breakdown kicker="Spending by category" rows={d.categories.filter((c) => c.spent > 0)} to={breakdownPath.category} value={(x) => x.spent} />

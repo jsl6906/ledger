@@ -411,11 +411,12 @@ export interface MerchantDetail extends EntityDetail {
 }
 export interface AccountDetail extends EntityDetail {
   account: {
-    id: number; name: string; institution_id: number | null; institution_name: string | null; account_type: string; mask: string | null
-    is_hidden: boolean; is_closed: boolean; notes: string | null; sources: string[]
+    id: number; name: string; institution_id: number | null; institution_name: string | null; account_type: string; liability: boolean
+    mask: string | null; is_hidden: boolean; is_closed: boolean; notes: string | null; sources: string[]
   }
   balance: { as_of: string; balance: number; available: number | null; source: string } | null
-  balance_history: { as_of: string; balance: number }[]
+  /** Derived like the Reports balance charts; liabilities as positive amounts owed. */
+  balance_history: { as_of: string; balance: number; estimated: boolean }[]
   holdings: { symbol: string | null; description: string | null; shares: number | null; market_value: number | null; cost_basis: number | null; as_of: string }[]
   categories: BreakdownRow[]; merchants: BreakdownRow[]
 }

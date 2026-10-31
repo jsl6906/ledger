@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ledger.analytics import entity
+from ledger.analytics import balances, entity
 from ledger.db.engine import get_session
 from ledger.models import (
     Account,
@@ -249,16 +249,8 @@ async def account_detail(
     if a is None:
         raise HTTPException(404, "Account not found")
     out = await _common(session, "account", account_id, start, end)
-    bal_sql = text(
-        """--sql
-        SELECT DISTINCT ON (as_of) as_of, balance, available FROM account_balance
-        WHERE account_id = :a AND as_of BETWEEN :start AND :end ORDER BY as_of, created_at DESC
-        """
-    )
-    history = [
-        {"as_of": r.as_of, "balance": float(r.balance)}
-        for r in await session.execute(bal_sql, {"a": account_id, "start": out["start"], "end": out["end"]})
-    ]
+    # Without a start the history goes back to the account's first known value, which may predate its transactions.
+    history = await balances.account_history(session, account_id, out["start"] if start else None, out["end"])
     latest = (
         await session.execute(
             text(
@@ -295,6 +287,7 @@ async def account_detail(
             "institution_id": a.institution_id,
             "institution_name": a.institution.name if a.institution else None,
             "account_type": a.account_type,
+            "liability": a.account_type in balances.LIABILITIES,
             "mask": a.mask,
             "is_hidden": a.is_hidden,
             "is_closed": a.is_closed,
