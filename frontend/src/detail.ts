@@ -11,18 +11,31 @@ const RANGES = Object.keys(BACK) as DetailRange[]
 /** Server-side sort columns of /transactions and the direction each starts in. */
 export const TXN_SORT = { date: 'desc', description: 'asc', category: 'asc', account: 'asc', amount: 'desc' } as const
 
-/** Range + picked-month state shared by the detail pages, kept in the URL (`range`, `month`); `start` is undefined
- * for all time. Changing either resets the transaction list's page. */
+/** Range + picked-month + picked stack segment state shared by the detail pages, kept in the URL (`range`, `month`,
+ * `sub`); `start` is undefined for all time. Changing any of them resets the transaction list's page. */
 export function useDetailRange(initial: DetailRange) {
   const [params, set] = useUrl()
   const range = oneOf(params, 'range', RANGES, initial)
   const month = params.get('month')
+  const sub = params.get('sub')
   const [today] = useState(() => new Date())
   const start = range === 'all' ? undefined : iso(new Date(today.getFullYear(), today.getMonth() - BACK[range], 1))
-  const setRange = (r: DetailRange) => set({ range: r === initial ? null : r, month: null, page: null })
-  const pick = (m: string) => set({ month: month === m ? null : m, page: null })
-  return { range, setRange, start, month, pick, clearMonth: () => set({ month: null, page: null }) }
+  const setRange = (r: DetailRange) => set({ range: r === initial ? null : r, month: null, sub: null, page: null })
+  const pick = (m: string) => set({ month: month === m && !sub ? null : m, sub: null, page: null })
+  const pickSub = (m: string, s: string) => {
+    const same = month === m && sub === s
+    set({ month: same ? null : m, sub: same ? null : s, page: null })
+  }
+  return {
+    range, setRange, start, month, pick, sub, pickSub,
+    clearMonth: () => set({ month: null, page: null }), clearSub: () => set({ sub: null, page: null }),
+  }
 }
+
+/** URL value of a stack series in `sub` ("Other" has no id). */
+export const OTHER_SUB = '~other'
+export const subKey = (s: { id: number | string | null }) => (s.id === null ? OTHER_SUB : String(s.id))
+export type DetailRangeState = ReturnType<typeof useDetailRange>
 
 /** "January 2020 – September 2026" style label for a detail range. */
 export function rangeLabel(start: string, end: string) {

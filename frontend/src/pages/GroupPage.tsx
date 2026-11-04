@@ -2,11 +2,10 @@ import { useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { get, put, type GroupDetail } from '../api'
-import { seriesColor } from '../chartUtils'
-import { Legend, MonthlyBars, TrendChart } from '../components/Charts'
-import { Breakdown, BudgetCard, Findings, Kpis, RangeSeg, RenameCard, TxnList, YearTable } from '../components/Detail'
+import { MonthlyBars, YtdBlock } from '../components/Charts'
+import { Breakdown, BudgetCard, Findings, Kpis, RangeSeg, RenameCard, StackCard, TxnList, YearTable } from '../components/Detail'
 import { Button, Card, ErrorNote } from '../components/ui'
-import { breakdownPath, measure, rangeLabel, summarize, useDetailRange } from '../detail'
+import { breakdownPath, measure, OTHER_SUB, rangeLabel, summarize, useDetailRange } from '../detail'
 import { fullDate, money, monthEnd, monthLabel, parseIso } from '../format'
 import { categoryPath, merchantPath } from '../links'
 import { RelatedSetup } from './CategoryPage'
@@ -41,13 +40,15 @@ function GroupView({ id }: { id: number }) {
   if (!d) return <section className="page text-muted">Loading…</section>
   const g = d.group
   const value = measure(g.type)
-  const sign = g.type === 'income' ? 1 : -1
   const sum = summarize(d.monthly, value)
   const catBudgets = d.categories.reduce((a, c) => a + (c.budget?.monthly ?? 0), 0)
   const budget = d.budget?.monthly ?? (catBudgets || null)
   const cats = d.categories.map((c) => ({ ...c, v: value(c) })).sort((a, b) => b.v - a.v)
   const maxCat = Math.max(1, ...cats.map((c) => Math.abs(c.v)))
-  const top = d.trend.series.slice(0, 6).map((s) => ({ ...s, values: s.values.map((v) => Math.max(0, g.type === 'transfer' ? Math.abs(v) : sign * v)) }))
+  const shown = d.stack.series.filter((s) => s.id !== null).map((s) => Number(s.id))
+  const otherIds = d.categories.map((c) => c.id).filter((c) => !shown.includes(c))
+  const subIds = r.sub === OTHER_SUB ? otherIds : r.sub ? [Number(r.sub)] : null
+  const subName = r.sub === OTHER_SUB ? 'Other categories' : d.categories.find((c) => String(c.id) === r.sub)?.name ?? r.sub
 
   return (
     <section className="page">
@@ -95,11 +96,8 @@ function GroupView({ id }: { id: number }) {
       </Card>
 
       <div className="grid-main-side">
-        <Card>
-          <div className="card-kicker">Categories over time</div>
-          <TrendChart months={d.trend.months} series={top} />
-          <Legend items={top.map((s, i) => ({ label: s.name, color: seriesColor(i) }))} />
-        </Card>
+        <StackCard kicker="Categories over time" stack={d.stack} r={r}
+          contrib={(m, s) => ({ start: m, end: monthEnd(m), basis: 'all', level: 'category', ids: s.id === null ? otherIds : [Number(s.id)] })} />
         <Card style={{ gap: 'var(--space-2)' }}>
           <div className="card-kicker">Categories · {rangeLabel(d.start, d.end)}</div>
           {cats.map((c) => (
@@ -117,6 +115,8 @@ function GroupView({ id }: { id: number }) {
         </Card>
       </div>
 
+      <Card><YtdBlock kicker="Year to date" data={d.ytd} verb={g.type === 'income' ? 'received' : 'spent'} /></Card>
+
       <div className="grid-2" style={{ alignItems: 'start' }}>
         <Breakdown kicker="Top merchants" rows={d.merchants} to={(x) => merchantPath(String(x.id))} value={value} />
         <Breakdown kicker="Accounts" rows={d.accounts} to={breakdownPath.account} value={value} />
@@ -125,7 +125,8 @@ function GroupView({ id }: { id: number }) {
       <RelatedSetup d={d} />
       <YearTable rows={d.yearly} show={g.type === 'income' ? ['received', 'spent', 'net'] : ['spent', 'received', 'net']} />
       <Findings params={{ group_id: id }} />
-      <TxnList params={{ group_id: id, start: r.start }} month={r.month} onClearMonth={r.clearMonth} />
+      <TxnList params={{ group_id: id, start: r.start, category_id: subIds ?? undefined }} month={r.month} onClearMonth={r.clearMonth}
+        sub={r.sub ? { label: subName ?? '', onClear: r.clearSub } : null} />
     </section>
   )
 }

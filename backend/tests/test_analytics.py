@@ -158,3 +158,7 @@ async def test_reports(client, data):
 
     span = (await client.get("/api/analytics/span")).json()
     assert span["start"] <= "2024-05-01" and span["end"] >= "2024-06-01"
+
+    ytd = (await client.get("/api/analytics/ytd", params={"years": 3})).json()
+    this_year = date.today().year
+    assert [y["year"] for y in ytd["expense"]["years"]][0] == this_year and len(ytd["income"]["years"]) <= 3

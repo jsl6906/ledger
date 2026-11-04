@@ -11,10 +11,17 @@ from statistics import median
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger.analytics.reports import ytd_lines
 from ledger.analytics.transfers import HIDDEN_ACCOUNT, INTERNAL_TRANSFER
 from ledger.budgets.service import add_months
 
 MERCHANT_KEY = "coalesce(t.merchant, lower(t.description))"
+# Bank descriptions with reference codes dropped: tokens (split on spaces, * and #) that contain a digit go.
+DESC_CODE = r"[^\s*#]*[0-9][^\s*#]*"
+DESC_SEP = r"[\s*#]+"
+_DESC_STRIPPED = f"regexp_replace(regexp_replace(t.description, '{DESC_CODE}', '', 'g'), '{DESC_SEP}', ' ', 'g')"
+DESC_LABEL = f"coalesce(nullif(btrim({_DESC_STRIPPED}), ''), t.description)"
+DESC_KEY = f"lower({DESC_LABEL})"
 SCOPES = {
     "merchant": f"{MERCHANT_KEY} = :key",
     "account": "t.account_id = :key",
@@ -35,7 +42,10 @@ BY = {
     "group": ("g.id", "coalesce(g.name, 'Uncategorized')"),
     "account": ("a.id", "coalesce(a.name, 'No account')"),
     "merchant": (MERCHANT_KEY, "coalesce(max(mp.display_name), (array_agg(t.description ORDER BY t.txn_date DESC))[1])"),
+    "description": (DESC_KEY, f"(array_agg({DESC_LABEL} ORDER BY t.txn_date DESC))[1]"),
 }
+# What a chart of the entity adds up: net income, net spend (refunds subtract), or gross money out / in.
+MEASURES = {"net": "t.amount", "spend": "-t.amount", "out": OUT, "in": IN}
 CADENCES = [
     ("weekly", 6, 8),
     ("every 2 weeks", 13, 16),
@@ -49,6 +59,11 @@ CADENCES = [
 
 def _f(v) -> float:
     return float(v or 0)
+
+
+def measure_for(category_type: str) -> str:
+    """The natural measure of a category (group) type, matching the detail pages' monthly bars."""
+    return {"income": "net", "expense": "spend"}.get(category_type, "out")
 
 
 def _where(scope: str) -> str:
@@ -125,29 +140,51 @@ async def monthly(session: AsyncSession, scope: str, key, start: date, end: date
     return out
 
 
-async def monthly_by(session: AsyncSession, scope: str, key, by: str, start: date, end: date) -> dict:
-    """Monthly net outflow per sub-entity (e.g. categories within a group)."""
+async def stacked(
+    session: AsyncSession, scope: str, key, by: str, measure: str, start: date, end: date, top: int = 5
+) -> dict:
+    """Monthly totals per sub-entity (e.g. categories within a group): the `top` largest over the range, then the rest
+    as one "Other" series (id null)."""
     ident, label = BY[by]
     sql = f"""--sql
         SELECT {ident} AS id, {label} AS name, CAST(date_trunc('month', t.txn_date) AS date) AS month,
-               sum(t.amount) AS net
+               sum({MEASURES[measure]}) AS v
         {FROM}
         WHERE {_where(scope)} AND t.txn_date BETWEEN :start AND :end
         GROUP BY {ident}, 3
+        ORDER BY 3 DESC
     """
+    months = _months(start, end)
+    slot = {m: i for i, m in enumerate(months)}
     names: dict = {}
     cells: dict = {}
     for r in await session.execute(text(sql), {"key": key, "start": start, "end": end}):
         names.setdefault(r.id, r.name)
-        cells[(r.id, r.month)] = _f(r.net)
-    months = _months(start, end)
+        cells.setdefault(r.id, [0.0] * len(months))[slot[r.month]] = _f(r.v)
+    ranked = sorted(cells, key=lambda i: -sum(cells[i]))
     series = [
-        {"id": i, "name": n, "values": [cells.get((i, m), 0.0) for m in months]} for i, n in names.items()
+        {"id": i, "name": names[i], "total": round(sum(cells[i]), 2), "values": cells[i]} for i in ranked[:top]
     ]
-    for s in series:
-        s["total"] = sum(s["values"])
-    series.sort(key=lambda s: abs(s["total"]), reverse=True)
+    rest = ranked[top:]
+    if rest:
+        values = [round(sum(cells[i][n] for i in rest), 2) for n in range(len(months))]
+        series.append({"id": None, "name": "Other", "total": round(sum(values), 2), "values": values})
     return {"months": months, "series": series}
+
+
+async def ytd(session: AsyncSession, scope: str, key, measure: str, years: int = 5, today: date | None = None) -> dict:
+    """Year-to-date running totals of the measure for this year and the `years - 1` before it."""
+    today = today or date.today()
+    first = today.year - years + 1
+    sql = f"""--sql
+        SELECT t.txn_date AS d, sum({MEASURES[measure]}) AS v
+        {FROM}
+        WHERE {_where(scope)} AND t.txn_date BETWEEN :start AND :end
+        GROUP BY 1
+    """
+    params = {"key": key, "start": date(first, 1, 1), "end": today}
+    daily = {r.d: _f(r.v) for r in await session.execute(text(sql), params)}
+    return ytd_lines(daily, first, today)
 
 
 async def yearly(session: AsyncSession, scope: str, key) -> list[dict]:

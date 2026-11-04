@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     # The digest covers the 7 days ending this many days before it is sent, so late-posting card charges have
     # landed (Tiller history: ~60% of a week's spend is in by the next morning, ~95% after 4 days).
     digest_lag_days: int = Field(default=4, ge=0, le=14)
+    # The monthly report on the previous month goes out once every active account has data this many days past
+    # month end (a statement only has to reach month end), or on monthly_digest_cap_day regardless.
+    monthly_digest_settle_days: int = Field(default=3, ge=0, le=14)
+    monthly_digest_cap_day: int = Field(default=8, ge=1, le=28)
     app_base_url: str | None = None  # used for links in emails, e.g. http://homeserver:8470
 
     # Inbound email: bills/receipts forwarded to a mailbox the app polls over IMAP

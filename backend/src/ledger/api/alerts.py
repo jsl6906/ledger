@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ledger.alerts import email_html as mail
 from ledger.alerts import questions
 from ledger.alerts.mailer import EMAIL_RE, MailNotConfigured, preview_html, send_email, smtp_configured
+from ledger.alerts.monthly import month_readiness, previous_month, render_monthly
 from ledger.alerts.service import active_recipients, footer, render_digest
 from ledger.config import get_settings
 from ledger.db.engine import get_session
@@ -29,6 +31,8 @@ async def status(session: AsyncSession = Depends(get_session)):
         "app_base_url": s.app_base_url,
         "digest_weekday": s.digest_weekday,
         "digest_lag_days": s.digest_lag_days,
+        "monthly_settle_days": s.monthly_digest_settle_days,
+        "monthly_cap_day": s.monthly_digest_cap_day,
         "recipients": len(await active_recipients(session)),
         "replies_saved": questions.replies_saved(),
     }
@@ -169,11 +173,22 @@ async def run_rules(session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/digest/preview")
-async def preview_digest(ai: bool = False, session: AsyncSession = Depends(get_session)):
-    d = await render_digest(session, date.today(), ai=ai)
+async def preview_digest(
+    kind: Literal["weekly", "monthly"] = "weekly", ai: bool = False, session: AsyncSession = Depends(get_session)
+):
+    if kind == "monthly":
+        d = await render_monthly(session, previous_month(date.today()), ai=ai)
+    else:
+        d = await render_digest(session, date.today(), ai=ai)
     return {**d, "html": preview_html(d["html"])}
 
 
 @router.post("/digest/send", response_model=JobOut, status_code=202)
-async def send_digest_now(session: AsyncSession = Depends(get_session)):
-    return await _enqueue(session, "weekly_digest", {"force": True})
+async def send_digest_now(kind: Literal["weekly", "monthly"] = "weekly", session: AsyncSession = Depends(get_session)):
+    return await _enqueue(session, f"{kind}_digest", {"force": True})
+
+
+@router.get("/digest/monthly/readiness")
+async def monthly_readiness(session: AsyncSession = Depends(get_session)):
+    """Whether last month's accounts have loaded, i.e. whether its monthly report is ready to send."""
+    return await month_readiness(session, previous_month(date.today()))

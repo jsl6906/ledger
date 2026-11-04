@@ -77,6 +77,11 @@ async def category_trend(
     return await reports.category_trend(session, *_range(start, end, months), level, top, ids, kind, other)
 
 
+@router.get("/analytics/ytd")
+async def ytd(years: int = Query(5, ge=1, le=20), session: AsyncSession = Depends(get_session)):
+    return await reports.ytd(session, years)
+
+
 @router.get("/analytics/contributors")
 async def contributors(
     start: date,

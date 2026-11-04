@@ -1,5 +1,6 @@
 from datetime import date
 
+from ledger.alerts.monthly import send_monthly
 from ledger.alerts.service import evaluate, send_digest
 from ledger.analytics.anomalies import detect, narrate
 from ledger.budgets.service import add_months
@@ -33,3 +34,9 @@ async def evaluate_alerts_job(ctx: JobContext) -> dict:
 async def weekly_digest_job(ctx: JobContext) -> dict:
     async with get_sessionmaker()() as session:
         return await send_digest(session, force=bool(ctx.payload.get("force")))
+
+
+@job_handler("monthly_digest")
+async def monthly_digest_job(ctx: JobContext) -> dict:
+    async with get_sessionmaker()() as session:
+        return await send_monthly(session, force=bool(ctx.payload.get("force")))

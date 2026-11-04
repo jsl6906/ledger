@@ -2,13 +2,16 @@ import { useState, type ReactNode } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
-  del, get, post, put, type Anomaly, type BreakdownRow, type BudgetInfo, type EntityYear, type PeriodType, type TransactionPage,
+  del, get, post, put, type Anomaly, type BreakdownRow, type BudgetInfo, type ContribParams, type EntityYear, type PeriodType, type Stack,
+  type TransactionPage,
 } from '../api'
-import { TXN_SORT, type DetailRange } from '../detail'
-import { fullDate, iso, money, monthLabel, parseIso, shortDate } from '../format'
+import { stackColor } from '../chartUtils'
+import { subKey, TXN_SORT, type DetailRange, type DetailRangeState } from '../detail'
+import { fullDate, iso, money, moneyRound, monthLabel, parseIso, shortDate } from '../format'
 import { accountPath, categoryPath, txnPath } from '../links'
 import { numParam, sortRows, useUrl, useUrlSort } from '../urlState'
 import { AnomalyList } from './AnomalyList'
+import { Legend, StackedBars } from './Charts'
 import { Button, Card, ErrorNote, Field, Seg, SortTh, TableCard } from './ui'
 
 export function RangeSeg({ value, onChange }: { value: DetailRange; onChange: (r: DetailRange) => void }) {
@@ -56,6 +59,40 @@ export function Breakdown({ kicker, rows, to, value, empty = 'Nothing in this ra
         )
       })}
       {rows.length === 0 && <div className="small text-muted">{empty}</div>}
+    </Card>
+  )
+}
+
+/** Monthly stacked bars of an entity's top sub-entities plus "Other". Clicking a segment filters the transaction list to
+ * that series and month (`sub` + `month`); clicking beside a bar picks just the month. */
+export function StackCard({ kicker, title, stack, r, contrib, show }: {
+  kicker: ReactNode; title?: ReactNode; stack: Stack; r: DetailRangeState
+  contrib?: (month: string, s: Stack['series'][number]) => ContribParams | undefined; show?: 'merchants' | 'transactions'
+}) {
+  const n = Math.max(1, stack.months.length)
+  return (
+    <Card>
+      <div className="card-kicker">{kicker}</div>
+      {title && <div className="card-title">{title}</div>}
+      {stack.series.length === 0 ? <div className="small text-muted">Nothing in this range.</div> : (
+        <>
+          <StackedBars months={stack.months} series={stack.series} highlight={r.month} onPick={r.pick}
+            onSegment={(i, si) => r.pickSub(stack.months[i], subKey(stack.series[si]))}
+            tip={(i, si, ctx) => {
+              const m = stack.months[i]
+              const label = monthLabel(parseIso(m))
+              if (si === null) return { title: label, lines: [`${money(ctx.total)} · 12-mo avg ${money(ctx.avg)}`] }
+              const s = stack.series[si]
+              const share = ctx.total > 0 ? [`${Math.round((s.values[i] / ctx.total) * 100)}% of the month`] : []
+              return { title: `${s.name} · ${label}`, lines: [money(s.values[i]), ...share], contrib: contrib?.(m, s), show }
+            }} />
+          <Legend items={[
+            ...stack.series.map((s, i) => ({ label: `${s.name} ${moneyRound(s.total / n)}/mo`, color: stackColor(s.name, i) })),
+            { label: '12-mo avg', color: 'var(--color-text)', dashed: true },
+          ]} />
+          <div className="card-meta">Click a segment to filter the transactions below to it for that month; click beside a bar for the whole month.</div>
+        </>
+      )}
     </Card>
   )
 }
@@ -169,13 +206,13 @@ export function Findings({ params }: { params: Record<string, string | number> }
 const PAGE = 25
 
 type TxnListProps = {
-  params: Record<string, string | number | undefined>; month?: string | null; onClearMonth?: () => void
-  hide?: ('category' | 'account')[]; highlightId?: number; title?: string
+  params: Record<string, string | number | undefined | (string | number)[]>; month?: string | null; onClearMonth?: () => void
+  sub?: { label: string; onClear: () => void } | null; hide?: ('category' | 'account')[]; highlightId?: number; title?: string
 }
 
 /** Paged transactions for a filter; rows link to the transaction page and to their category/account pages. Sort and
  * page live in the URL (`sort`, `page`). */
-export function TxnList({ params, month, onClearMonth, hide = [], highlightId, title = 'Transactions' }: TxnListProps) {
+export function TxnList({ params, month, onClearMonth, sub, hide = [], highlightId, title = 'Transactions' }: TxnListProps) {
   const [url, set] = useUrl()
   const sort = useUrlSort(TXN_SORT, 'date_desc', 'sort', ['page'])
   const page = Math.max(1, numParam(url, 'page') ?? 1)
@@ -198,6 +235,7 @@ export function TxnList({ params, month, onClearMonth, hide = [], highlightId, t
             {month && (
               <button className="tag tag-outline chip" onClick={onClearMonth}>{monthLabel(parseIso(month))} ×</button>
             )}
+            {sub && <button className="tag tag-outline chip" onClick={sub.onClear}>{sub.label} ×</button>}
           </div>
           <span className="small text-muted">
             {total.toLocaleString()} · in {money(list.data?.total_in ?? 0)} · out {money(list.data?.total_out ?? 0)}

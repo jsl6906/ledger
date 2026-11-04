@@ -3,9 +3,10 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy import select
 
+from ledger.alerts import monthly
 from ledger.alerts import service as alerts
 from ledger.db.engine import get_sessionmaker
-from ledger.models import AlertEvent, Anomaly
+from ledger.models import AccountBalance, AlertEvent, Anomaly
 
 
 async def test_mailer_builds_safe_message(monkeypatch):
@@ -59,15 +60,19 @@ def outbox(monkeypatch):
     monkeypatch.setattr(alerts, "smtp_configured", lambda: True)
 
     async def no_ai(d):
-        return alerts.DigestNarrative(
-            summary="A quiet week.",
-            budget="Groceries is on pace to run over.",
-            notable=["TAL STORE $420 is the largest charge."],
-            trends=[],
-            recommendations=["Hold back on <dining> for the rest of the month."],
+        return alerts.DigestNarrative(summary="A quiet week.")
+
+    async def no_monthly_ai(d):
+        return monthly.MonthlyNarrative(
+            summary="A steady month.",
+            budget="Dining went over.",
+            spending=["Most of it went on MRX NEWSHOP."],
+            notable=[],
+            recommendations=["Hold back on <dining> next month."],
         )
 
     monkeypatch.setattr(alerts, "_ai_narrative", no_ai)
+    monkeypatch.setattr(monthly, "_ai_narrative", no_monthly_ai)
     return sent
 
 
@@ -83,7 +88,7 @@ async def test_recipients_and_rules_api(client):
     assert (await client.post("/api/alerts/recipients", json={"email": "alerts@example.com"})).status_code == 409
 
     rules = {r["kind"]: r for r in (await client.get("/api/alerts/rules")).json()}
-    assert set(rules) == {"budget_overspend", "out_of_norm", "large_transaction", "weekly_digest"}
+    assert set(rules) == {"budget_overspend", "out_of_norm", "large_transaction", "weekly_digest", "monthly_digest"}
     assert rules["large_transaction"]["params"]["threshold"] == 500
     r = await client.put("/api/alerts/rules/large_transaction", json={"threshold": 750, "pace": False})
     assert r.json()["params"] == {"threshold": 750.0}
@@ -177,9 +182,10 @@ async def test_weekly_digest(client, outbox):
 
     async with get_sessionmaker()() as s:
         d = await alerts.render_digest(s, date.today())
-    assert d["summary"] == "A quiet week."
-    assert "Recommendations\n- Hold back on <dining>" in d["text"] and "Trends" not in d["text"]
-    assert "<li" in d["html"] and "&lt;dining&gt;" in d["html"]
+    assert d["summary"] == "A quiet week." and d["text"].startswith("A quiet week.")
+    # Highlights only: the in-depth sections are in the monthly report.
+    assert not any(h in d["text"] for h in ("Top merchants", "Top categories", "Trends", "Recommendations"))
+    assert "Weekly highlights" in d["html"]
 
     async with get_sessionmaker()() as s:
         week = await alerts.digest_data(s, date(2031, 3, 7))
@@ -190,6 +196,59 @@ async def test_weekly_digest(client, outbox):
         again = await alerts.send_digest(s, date(2031, 3, 5))
     assert first["status"] == "sent" and again["status"] == "already_sent"
     assert outbox[-1]["subject"].startswith("Ledger weekly digest")
+
+
+async def test_monthly_report_waits_for_accounts_to_load(client, outbox):
+    card = (await client.post("/api/accounts", json={"name": "MRX Card", "account_type": "credit_card"})).json()
+    checking = (await client.post("/api/accounts", json={"name": "MRX Checking"})).json()
+
+    async def txn(acct: dict, day: str, desc: str, amount: str) -> None:
+        body = {"txn_date": day, "description": desc, "amount": amount, "account_id": acct["id"]}
+        assert (await client.post("/api/transactions", json=body)).status_code == 201
+
+    await txn(card, "2035-04-10", "MRX DINER", "-50.00")
+    await txn(card, "2035-05-12", "MRX DINER", "-120.00")
+    await txn(card, "2035-05-20", "MRX NEWSHOP", "-800.00")
+    await txn(checking, "2035-05-15", "MRX PAYROLL", "3000.00")
+    may = date(2035, 5, 1)
+
+    async with get_sessionmaker()() as s:
+        r = await monthly.month_readiness(s, may)
+        assert not r["ready"] and r["missing"] == ["MRX Card", "MRX Checking"]
+        assert r["send_by"] == date(2035, 6, 8) and r["needed_through"] == date(2035, 6, 3)
+        assert (await monthly.send_monthly(s, date(2035, 6, 4)))["status"] == "waiting"
+
+    # Checking: transactions reach the settle days past month end. Card: a statement closes at month end.
+    await txn(checking, "2035-06-03", "MRX COFFEE", "-4.00")
+    async with get_sessionmaker()() as s:
+        s.add(AccountBalance(account_id=card["id"], as_of=date(2035, 5, 31), balance=920, source="statement"))
+        await s.commit()
+        r = await monthly.month_readiness(s, may)
+        assert r["ready"] and {a["name"] for a in r["accounts"]} == {"MRX Card", "MRX Checking"}
+        sent = await monthly.send_monthly(s, date(2035, 6, 4))
+        again = await monthly.send_monthly(s, date(2035, 6, 5))
+    assert sent["status"] == "sent" and again["status"] == "already_sent"
+    mail = outbox[-1]
+    assert mail["subject"] == "Ledger monthly report · May 2035"
+    assert mail["text"].startswith("A steady month.") and "hadn’t loaded" not in mail["text"]
+    assert "New merchants\n- MRX NEWSHOP: $800.00 (1)" in mail["text"]
+    assert "Income $3,000.00, spending $920.00" in mail["text"] and "All 2 active accounts had loaded" in mail["text"]
+    assert "Recommendations\n- Hold back on <dining>" in mail["text"]
+    assert "<li" in mail["html"] and "&lt;dining&gt;" in mail["html"]
+
+    # June never loads on the card: the report waits until the cap day, then names the account.
+    await txn(card, "2035-06-10", "MRX DINER", "-30.00")
+    await txn(checking, "2035-07-04", "MRX COFFEE", "-4.00")
+    async with get_sessionmaker()() as s:
+        assert (await monthly.send_monthly(s, date(2035, 7, 7)))["missing"] == ["MRX Card"]
+        assert (await monthly.send_monthly(s, date(2035, 7, 8)))["status"] == "sent"
+    assert outbox[-1]["subject"] == "Ledger monthly report · June 2035"
+    assert "Some accounts hadn’t loaded June 2035 yet (MRX Card)" in outbox[-1]["text"]
+    assert "MRX Card: not loaded (data through 10 Jun)" in outbox[-1]["text"]
+
+    preview = (await client.get("/api/alerts/digest/preview", params={"kind": "monthly"})).json()
+    assert preview["subject"].startswith("Ledger monthly report")
+    assert (await client.get("/api/alerts/digest/monthly/readiness")).status_code == 200
 
 
 async def test_emails_link_into_the_app(client, outbox, monkeypatch):
@@ -232,7 +291,10 @@ async def test_emails_link_into_the_app(client, outbox, monkeypatch):
 
     async with get_sessionmaker()() as s:
         d = await alerts.render_digest(s, today + timedelta(days=1 + settings.digest_lag_days), ai=False)
-    assert f"{base}/transactions?start=" in d["text"] and f'href="{base}/merchants?key=' in d["html"]
+    assert f"{base}/transactions?start=" in d["text"]
+    async with get_sessionmaker()() as s:
+        m = await monthly.render_monthly(s, today.replace(day=1), ai=False)
+    assert f"{base}/transactions?start=" in m["text"] and f'href="{base}/merchants?key=' in m["html"]
 
 
 async def test_ask_about_transactions(client, monkeypatch):

@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
-import { ACCOUNT_TYPES, get, type AlertEvent, type Balances, type BudgetRow, type BudgetStatus, type CashflowMonth, type Summary, type TransactionPage } from '../api'
+import { ACCOUNT_TYPES, get, type AlertEvent, type Balances, type BudgetRow, type BudgetStatus, type CashflowMonth, type Summary, type TransactionPage, type Ytd } from '../api'
 import { AnomalyList } from '../components/AnomalyList'
-import { CashflowChart, Legend } from '../components/Charts'
+import { CashflowChart, Legend, YtdBlock } from '../components/Charts'
 import { BalanceSparkline } from '../components/LineChart'
 import { Button, Card } from '../components/ui'
 import { fullDate, iso, money, moneyRound, monthEnd, monthLabel, parseIso, shortDate } from '../format'
@@ -47,6 +47,7 @@ export function Dashboard() {
       categoryIds: [...new Set(expenseRows.flatMap((r) => r.category_ids))] }
   })() : null
   const flow = useQuery({ queryKey: ['analytics', 'cashflow', 12], queryFn: () => get<CashflowMonth[]>('/analytics/cashflow', { months: 12 }) })
+  const ytd = useQuery({ queryKey: ['analytics', 'ytd'], queryFn: () => get<{ expense: Ytd; income: Ytd }>('/analytics/ytd') })
   const anomalies = useAnomalies()
   const balances = useQuery({ queryKey: ['balances'], queryFn: () => get<Balances>('/balances') })
   const trend = useBalanceTrend()
@@ -63,7 +64,7 @@ export function Dashboard() {
   const typeRank = (t: string) => { const i = ACCOUNT_TYPES.indexOf(t); return i < 0 ? ACCOUNT_TYPES.length : i }
   const groupedAccounts = [...accountGroups.entries()].sort(([x], [y]) => typeRank(x) - typeRank(y))
   const alertEvents = useQuery({ queryKey: ['alerts', 'events'], queryFn: () => get<AlertEvent[]>('/alerts/events', { limit: 12 }) })
-  const lastSent = alertEvents.data?.find((e) => e.status === 'sent' && e.kind !== 'weekly_digest' && e.kind !== 'question')
+  const lastSent = alertEvents.data?.find((e) => e.status === 'sent' && !['weekly_digest', 'monthly_digest', 'question'].includes(e.kind))
   const s = summary.data
   const mon = now.toLocaleString('en-US', { month: 'short' })
 
@@ -169,6 +170,16 @@ export function Dashboard() {
           </Link>
         </Card>
       </div>
+
+      {ytd.data && (
+        <Card>
+          <div className="grid-2">
+            <div className="stack"><YtdBlock kicker="Expenses · year to date" data={ytd.data.expense} verb="spent" /></div>
+            <div className="stack"><YtdBlock kicker="Income · year to date" data={ytd.data.income} verb="received" /></div>
+          </div>
+          <div className="card-meta">Running totals from January 1, excluding internal transfers and hidden accounts and categories. Hover for each year's total on that day.</div>
+        </Card>
+      )}
 
       <div className="grid-2">
         <Card className="fill-card">

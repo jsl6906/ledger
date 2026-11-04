@@ -1,5 +1,7 @@
-import type { ReactNode } from 'react'
+import { useState, type MouseEvent, type ReactNode } from 'react'
+import type { Ytd } from '../api'
 import { compactMoney as compact, monthTick, seriesColor, stackColor } from '../chartUtils'
+import { money, moneyRound } from '../format'
 import { tipHandlers, useTip, type TipSpec } from '../tip'
 
 /** Paired income/expense bars per month with a net marker, as in the dashboard prototype. */
@@ -532,5 +534,98 @@ export function ChargesChart({ charges, highlightId, median, onPick, height = 20
         </g>
       )}
     </svg>
+  )
+}
+
+// Day slots (leap-year calendar) where each month starts, as in Ytd.values.
+const MONTH_SLOTS = [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const YTD_LINES = [
+  { color: 'var(--color-accent-700)', width: 2.5 }, { color: 'var(--color-accent-400)', width: 1.75 },
+  { color: 'var(--color-neutral-600)', width: 1.25 }, { color: 'var(--color-neutral-400)', width: 1.25 },
+  { color: 'var(--color-neutral-300)', width: 1.25 },
+]
+const ytdLine = (i: number) => YTD_LINES[Math.min(i, YTD_LINES.length - 1)]
+const dayLabel = (slot: number) => {
+  const m = MONTH_SLOTS.findLastIndex((s) => s <= slot)
+  return `${MONTH_ABBR[m]} ${slot - MONTH_SLOTS[m] + 1}`
+}
+
+/** Running year-to-date totals, one line per year on a shared Jan–Dec axis; the newest year is drawn boldest. */
+export function YtdChart({ data, height = 220 }: { data: Ytd; height?: number }) {
+  const t = useTip()
+  const [hover, setHover] = useState<number | null>(null)
+  const w = 640
+  const top = 8
+  const base = height - 20
+  const left = 44
+  const right = 8
+  const vals = data.years.flatMap((yr) => yr.values)
+  const ticks = niceTicks(Math.min(0, ...vals), Math.max(1, ...vals), 4)
+  const lo = ticks[0]
+  const hi = ticks[ticks.length - 1]
+  const x = (slot: number) => left + (slot / 365) * (w - left - right)
+  const y = (v: number) => base - ((v - lo) / (hi - lo || 1)) * (base - top)
+  const cur = data.years[0]
+  const move = (e: MouseEvent<SVGRectElement>) => {
+    const box = e.currentTarget.getBoundingClientRect()
+    const slot = Math.max(0, Math.min(365, Math.round(((e.clientX - box.left) / box.width) * 365)))
+    setHover(slot)
+    const lines = data.years.filter((yr) => yr.values[slot] !== undefined).map((yr) => `${yr.year}: ${money(yr.values[slot])}`)
+    t.show({ title: `Through ${dayLabel(slot)}`, lines }, e)
+  }
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} width="100%" style={{ display: 'block' }}>
+      {ticks.map((v) => (
+        <g key={v}>
+          <line x1={left - 4} y1={y(v)} x2={w} y2={y(v)} stroke="var(--color-divider)" strokeDasharray={v === 0 ? undefined : '2 4'} />
+          <text x="0" y={y(v) + 3} fontSize="10" fill="var(--color-neutral-600)" fontFamily="Barlow">{axisMoney(v)}</text>
+        </g>
+      ))}
+      {MONTH_SLOTS.map((s, i) => (
+        <text key={s} x={x(s + 15)} y={height - 4} fontSize="10" textAnchor="middle" fill="var(--color-neutral-600)" fontFamily="Barlow">
+          {MONTH_ABBR[i]}
+        </text>
+      ))}
+      {data.years.map((yr, i) => ({ yr, i })).reverse().map(({ yr, i }) => (
+        <polyline key={yr.year} fill="none" stroke={ytdLine(i).color} strokeWidth={ytdLine(i).width} strokeLinejoin="round"
+          pointerEvents="none" points={yr.values.map((v, d) => `${x(d)},${y(v)}`).join(' ')} />
+      ))}
+      {cur && cur.values.length > 0 && cur.values.length < 366 && (
+        <circle cx={x(cur.values.length - 1)} cy={y(cur.total)} r="3.5" fill={ytdLine(0).color} pointerEvents="none" />
+      )}
+      {hover !== null && (
+        <line x1={x(hover)} y1={top} x2={x(hover)} y2={base} stroke="var(--color-neutral-400)" strokeDasharray="2 3" pointerEvents="none" />
+      )}
+      <rect x={x(0)} y={0} width={x(365) - x(0)} height={base} fill="transparent" onMouseMove={move}
+        onMouseLeave={() => { setHover(null); t.hide() }} />
+    </svg>
+  )
+}
+
+/** Year-to-date headline (vs the same day last year), the YtdChart and a legend of each year's total. */
+export function YtdBlock({ kicker, data, verb }: { kicker: ReactNode; data: Ytd; verb: string }) {
+  const [cur, prev] = data.years
+  if (!cur) return null
+  const slot = cur.values.length - 1
+  const then = prev?.values[slot]
+  const pct = then ? ((cur.total - then) / Math.abs(then)) * 100 : null
+  return (
+    <>
+      <div>
+        <div className="card-kicker">{kicker}</div>
+        <div className="card-title">{moneyRound(cur.total)} {verb} year to date</div>
+        {prev && then !== undefined && (
+          <div className="card-meta">
+            vs {moneyRound(then)} by {dayLabel(slot)}, {prev.year}
+            {pct !== null && ` (${pct >= 0 ? '+' : '−'}${Math.abs(Math.round(pct))}%)`} · {moneyRound(prev.total)} for all of {prev.year}
+          </div>
+        )}
+      </div>
+      <YtdChart data={data} />
+      <Legend items={data.years.map((yr, i) => ({
+        label: `${yr.year} ${i === 0 ? 'so far' : 'total'} ${moneyRound(yr.total)}`, color: ytdLine(i).color,
+      }))} />
+    </>
   )
 }

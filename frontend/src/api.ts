@@ -314,7 +314,7 @@ export interface HoldingRow {
 }
 
 // ---- alerts ----
-export type AlertKind = 'budget_overspend' | 'out_of_norm' | 'large_transaction' | 'weekly_digest'
+export type AlertKind = 'budget_overspend' | 'out_of_norm' | 'large_transaction' | 'weekly_digest' | 'monthly_digest'
 export interface AlertRule { kind: AlertKind; enabled: boolean; params: { pace?: boolean; threshold?: number }; updated_at: string }
 export interface AlertRecipient { id: number; email: string; name: string | null; enabled: boolean; created_at: string }
 export interface AlertEvent {
@@ -326,11 +326,19 @@ export interface AlertEvent {
 }
 export interface AlertStatus {
   smtp_configured: boolean; smtp_host: string | null; smtp_from: string | null; app_base_url: string | null
-  digest_weekday: string; digest_lag_days: number; recipients: number
+  digest_weekday: string; digest_lag_days: number; monthly_settle_days: number; monthly_cap_day: number; recipients: number
   /** Replies to emailed questions reach the app's inbox and are saved as notes. */
   replies_saved: boolean
 }
 export interface DigestPreview { subject: string; title: string; text: string; html: string; summary: string | null }
+/** Whether last month's active accounts have loaded, i.e. whether its monthly report is ready to send. */
+export interface MonthlyReadiness {
+  month: string; label: string; end: string; needed_through: string; send_by: string; ready: boolean
+  accounts: { id: number; name: string; loaded: boolean; loaded_through: string | null }[]
+  missing: string[]
+  /** Status of the month's report if it has gone out (sent, skipped, failed), else null. */
+  sent: AlertEvent['status'] | null
+}
 /** Someone a question about transactions can be emailed to (household member with an email, or alert recipient). */
 export interface Person { email: string; name: string | null }
 
@@ -352,6 +360,8 @@ export interface CategoryRow {
   category_id: number | null; category: string; group_id: number | null; group: string; spent: number; income: number; count: number
 }
 export interface Trend { months: string[]; series: { id: number | null; name: string; total: number; values: number[] }[] }
+/** Year-to-date running totals, newest year first; each year has 366 daily points (leap-year calendar), this year's up to `today`. */
+export interface Ytd { today: string; years: { year: number; values: number[]; total: number }[] }
 /** Month-end balances from /analytics/balances (hidden accounts left out); liabilities are negative so accounts add up to net worth. */
 export interface BalanceSeries {
   months: string[]; dates: string[]
@@ -400,10 +410,13 @@ export interface Charge { id: number; date: string; amount: number; description:
 export interface Cadence { label: string; days: number; next_date: string; typical_amount: number | null; lapsed: boolean }
 export interface BudgetInfo { id: number; amount: number; period_type: PeriodType; monthly: number; notes: string | null }
 interface EntityDetail { start: string; end: string; stats: EntityStats; monthly: EntityMonth[]; yearly: EntityYear[] }
+/** Monthly totals per sub-entity in the page's measure: the top 5 over the range, then "Other" (id null). */
+export interface Stack { months: string[]; series: { id: number | string | null; name: string; total: number; values: number[] }[] }
+interface EntityReports { stack: Stack; ytd: Ytd }
 interface CategoryLinks {
   bill_series: { id: number; name: string }[]; spread_rules: { id: number; name: string; months: number }[]; category_rules: number
 }
-export interface MerchantDetail extends EntityDetail {
+export interface MerchantDetail extends EntityDetail, EntityReports {
   key: string; name: string; display_name: string | null; aliases: string[]; overridden: number
   descriptions: { description: string; count: number; last_date: string }[]
   latest_description: string; charges: Charge[]; cadence: Cadence | null; categories: BreakdownRow[]; accounts: BreakdownRow[]
@@ -427,21 +440,20 @@ export interface AccountDetail extends EntityDetail {
   holdings: { symbol: string | null; description: string | null; shares: number | null; market_value: number | null; cost_basis: number | null; as_of: string }[]
   categories: BreakdownRow[]; merchants: BreakdownRow[]
 }
-export interface CategoryDetail extends EntityDetail, CategoryLinks {
+export interface CategoryDetail extends EntityDetail, EntityReports, CategoryLinks {
   category: {
     id: number; name: string; type: CategoryType; group_id: number; group_name: string; sort_order: number; description: string | null
     hide_from_reports: boolean; is_active: boolean
   }
   budget: BudgetInfo | null; merchants: BreakdownRow[]; accounts: BreakdownRow[]
 }
-export interface GroupDetail extends EntityDetail, CategoryLinks {
+export interface GroupDetail extends EntityDetail, EntityReports, CategoryLinks {
   group: { id: number; name: string; type: CategoryType; sort_order: number; hide_from_reports: boolean }
   budget: BudgetInfo | null
   categories: {
     id: number; name: string; is_active: boolean; budget: BudgetInfo | null; spent: number; received: number; net: number
     count: number; last_date: string | null
   }[]
-  trend: { months: string[]; series: { id: number | null; name: string; values: number[]; total: number }[] }
   merchants: BreakdownRow[]; accounts: BreakdownRow[]
 }
 export interface MerchantHit { key: string; name: string; count: number; last_date: string }

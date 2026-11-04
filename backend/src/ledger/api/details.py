@@ -161,6 +161,7 @@ async def merchant_detail(
             Transaction.merchant == key, Transaction.merchant_source == "user", Transaction.deleted_at.is_(None)
         )
     )
+    measure = "in" if out["stats"]["received"] > out["stats"]["spent"] else "out"
     return out | {
         "key": key,
         "name": (profile.display_name if profile else None) or merchants.default_name(key),
@@ -173,6 +174,8 @@ async def merchant_detail(
         "cadence": entity.cadence(rows),
         "categories": await entity.breakdown(session, "merchant", key, "category", out["start"], out["end"]),
         "accounts": await entity.breakdown(session, "merchant", key, "account", out["start"], out["end"]),
+        "stack": await entity.stacked(session, "merchant", key, "description", measure, out["start"], out["end"]),
+        "ytd": await entity.ytd(session, "merchant", key, measure),
         "rule": rule_out,
     }
 
@@ -341,6 +344,7 @@ async def category_detail(
         raise HTTPException(404, "Category not found")
     out = await _common(session, "category", category_id, start, end)
     budget = await session.scalar(select(Budget).where(Budget.category_id == category_id))
+    measure = entity.measure_for(c.type)
     return (
         out
         | {
@@ -358,6 +362,10 @@ async def category_detail(
             "budget": _budget(budget),
             "merchants": await entity.breakdown(session, "category", category_id, "merchant", out["start"], out["end"]),
             "accounts": await entity.breakdown(session, "category", category_id, "account", out["start"], out["end"]),
+            "stack": await entity.stacked(
+                session, "category", category_id, "merchant", measure, out["start"], out["end"]
+            ),
+            "ytd": await entity.ytd(session, "category", category_id, measure),
         }
         | await _series_and_rules(session, [category_id])
     )
@@ -405,7 +413,10 @@ async def group_detail(
                 }
                 for c in cats
             ],
-            "trend": await entity.monthly_by(session, "group", group_id, "category", out["start"], out["end"]),
+            "stack": await entity.stacked(
+                session, "group", group_id, "category", entity.measure_for(g.type), out["start"], out["end"]
+            ),
+            "ytd": await entity.ytd(session, "group", group_id, entity.measure_for(g.type)),
             "merchants": await entity.breakdown(session, "group", group_id, "merchant", out["start"], out["end"]),
             "accounts": await entity.breakdown(session, "group", group_id, "account", out["start"], out["end"]),
         }

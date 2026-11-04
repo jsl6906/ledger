@@ -3,19 +3,22 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   del, get, patch, post, put,
   type AlertEvent, type AlertKind, type AlertRecipient, type AlertRule, type AlertStatus, type DigestPreview, type Job,
+  type MonthlyReadiness,
 } from '../api'
 import { Button, Card, ErrorNote, Seg } from '../components/ui'
 import { useJob } from '../hooks'
 import { shortDate } from '../format'
 
 const DAYS: Record<string, string> = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' }
-const ORDER: AlertKind[] = ['budget_overspend', 'out_of_norm', 'large_transaction', 'weekly_digest']
+const ORDER: AlertKind[] = ['budget_overspend', 'out_of_norm', 'large_transaction', 'weekly_digest', 'monthly_digest']
 const TITLES: Record<AlertKind, string> = {
   budget_overspend: 'Budget overspend',
   out_of_norm: 'Out-of-norm spending',
   large_transaction: 'Large single transaction',
-  weekly_digest: 'Weekly digest',
+  weekly_digest: 'Weekly highlights',
+  monthly_digest: 'Monthly report',
 }
+type DigestKind = 'weekly' | 'monthly'
 const STATUS_TAG: Record<AlertEvent['status'], string> = { sent: 'tag-accent', pending: 'tag-outline', skipped: 'tag-neutral', failed: 'tag-outline' }
 
 export function Alerts() {
@@ -23,6 +26,10 @@ export function Alerts() {
   const status = useQuery({ queryKey: ['alerts', 'status'], queryFn: () => get<AlertStatus>('/alerts/status') })
   const rules = useQuery({ queryKey: ['alerts', 'rules'], queryFn: () => get<AlertRule[]>('/alerts/rules') })
   const events = useQuery({ queryKey: ['alerts', 'events'], queryFn: () => get<AlertEvent[]>('/alerts/events', { limit: 12 }) })
+  const readiness = useQuery({
+    queryKey: ['alerts', 'monthly-readiness'],
+    queryFn: () => get<MonthlyReadiness>('/alerts/digest/monthly/readiness'),
+  })
   const [jobId, setJobId] = useState<number | null>(null)
   const job = useJob(jobId)
   const jobDone = job.data && ['succeeded', 'failed', 'cancelled'].includes(job.data.status)
@@ -42,12 +49,15 @@ export function Alerts() {
     onSuccess: (r) => setNote(`Test email sent to ${r.sent_to.join(', ')}`),
   })
   const digest = useMutation({
-    mutationFn: () => get<DigestPreview>('/alerts/digest/preview', { ai: true }),
+    mutationFn: (kind: DigestKind) => get<DigestPreview>('/alerts/digest/preview', { kind, ai: true }),
     onSuccess: setPreview,
   })
 
   useEffect(() => {
-    if (jobDone) qc.invalidateQueries({ queryKey: ['alerts', 'events'] })
+    if (jobDone) {
+      qc.invalidateQueries({ queryKey: ['alerts', 'events'] })
+      qc.invalidateQueries({ queryKey: ['alerts', 'monthly-readiness'] })
+    }
   }, [jobDone, jobId, qc])
   const byKind = new Map((rules.data ?? []).map((r) => [r.kind, r]))
   const s = status.data
@@ -62,7 +72,7 @@ export function Alerts() {
           </div>
         </div>
       </header>
-      <ErrorNote error={status.error || rules.error || update.error || runJob.error || test.error || digest.error} />
+      <ErrorNote error={status.error || rules.error || update.error || runJob.error || test.error || digest.error || readiness.error} />
       {s && !s.smtp_configured && (
         <div className="callout">
           SMTP isn’t configured, so alerts are recorded here but not emailed. Set <code>SMTP_HOST</code>,{' '}
@@ -79,7 +89,8 @@ export function Alerts() {
               padding: 'var(--space-3) var(--space-4)', borderBottom: '1px solid var(--color-divider)', alignItems: 'center' }}>
               <div className="stack" style={{ gap: 4 }}>
                 <div style={{ fontWeight: 500 }}>{TITLES[kind]}</div>
-                <div className="muted-2" style={{ fontSize: 13 }}><RuleDescription rule={r} weekday={s?.digest_weekday} lagDays={s?.digest_lag_days} /></div>
+                <div className="muted-2" style={{ fontSize: 13 }}><RuleDescription rule={r} status={s} /></div>
+                {kind === 'monthly_digest' && readiness.data && <Readiness r={readiness.data} />}
                 {kind === 'budget_overspend' && (
                   <label className="row small" style={{ gap: 6 }}>
                     <input type="checkbox" checked={r.params.pace !== false}
@@ -125,10 +136,12 @@ export function Alerts() {
       <div className="row">
         <Button onClick={() => test.mutate()} disabled={test.isPending || !s?.smtp_configured}>Send test email</Button>
         <Button onClick={() => runJob.mutate('/alerts/run')} disabled={runJob.isPending}>Check rules now</Button>
-        <Button onClick={() => digest.mutate()} disabled={digest.isPending}>{digest.isPending ? 'Building…' : 'Preview digest'}</Button>
-        <Button onClick={() => runJob.mutate('/alerts/digest/send')} disabled={runJob.isPending}>Send digest now</Button>
+        <Button onClick={() => digest.mutate('weekly')} disabled={digest.isPending}>Preview weekly</Button>
+        <Button onClick={() => digest.mutate('monthly')} disabled={digest.isPending}>Preview monthly</Button>
+        <Button onClick={() => runJob.mutate('/alerts/digest/send?kind=weekly')} disabled={runJob.isPending}>Send weekly now</Button>
+        <Button onClick={() => runJob.mutate('/alerts/digest/send?kind=monthly')} disabled={runJob.isPending}>Send monthly now</Button>
         <span className="small text-muted">
-          {note ?? (job.data && (jobDone ? `${job.data.type.replace('_', ' ')}: ${job.data.status}` + resultNote(job.data) : 'Working…'))}
+          {digest.isPending ? 'Building preview…' : note ?? (job.data && (jobDone ? `${job.data.type.replace('_', ' ')}: ${job.data.status}` + resultNote(job.data) : 'Working…'))}
         </span>
       </div>
 
@@ -153,7 +166,7 @@ function resultNote(j: Job): string {
   return r.status ? ` — ${r.status.replace('_', ' ')}` : ''
 }
 
-function RuleDescription({ rule, weekday, lagDays }: { rule: AlertRule; weekday?: string; lagDays?: number }) {
+function RuleDescription({ rule, status }: { rule: AlertRule; status?: AlertStatus }) {
   switch (rule.kind) {
     case 'budget_overspend':
       return <>When any category passes 100% of its period budget{rule.params.pace !== false ? ', or is on pace to by period end' : ''}.</>
@@ -161,12 +174,37 @@ function RuleDescription({ rule, weekday, lagDays }: { rule: AlertRule; weekday?
       return <>Category or merchant spending well above its trailing 12-month norm, big first-time merchants, and bill jumps.</>
     case 'large_transaction':
       return <>Any single debit over the threshold that isn’t a known recurring payment.</>
-    default:
+    case 'monthly_digest': {
+      const settle = status?.monthly_settle_days ?? 3
       return <>
-        {DAYS[weekday ?? 'fri']} morning summary of the 7 days ending {lagDays ? `${lagDays + 1} days earlier, once late-posting charges have landed` : 'the day before'}:
-        spend vs a typical week, budgets, and items to review.
+        In-depth review of last month — income, spending and savings vs typical, every budget, categories, merchants,
+        net worth and recommendations. Sent once every active account has loaded the month (a statement through month
+        end, or transactions/balances {settle} day{settle === 1 ? '' : 's'} past it), and on the{' '}
+        {ordinal(status?.monthly_cap_day ?? 8)} at the latest.
       </>
+    }
+    default: {
+      const lagDays = status?.digest_lag_days
+      return <>
+        {DAYS[status?.digest_weekday ?? 'fri']} morning highlights of the 7 days ending {lagDays ? `${lagDays + 1} days earlier, once late-posting charges have landed` : 'the day before'}:
+        spend vs a typical week, the largest charges, budgets running over, and items to review.
+      </>
+    }
   }
+}
+
+function Readiness({ r }: { r: MonthlyReadiness }) {
+  const waiting = r.accounts.filter((a) => !a.loaded)
+  let text: string
+  if (r.sent) text = `${r.label}: report ${r.sent}.`
+  else if (!r.accounts.length || r.ready) text = `${r.label}: ${r.accounts.length ? `all ${r.accounts.length} active accounts loaded` : 'no active accounts'} — sends at the next morning check.`
+  else text = `${r.label}: waiting on ${waiting.map((a) => a.loaded_through ? `${a.name} (through ${shortDate(a.loaded_through)})` : a.name).join(', ')}; sends by ${shortDate(r.send_by)}.`
+  return <div className="small text-muted">{text}</div>
+}
+
+function ordinal(n: number): string {
+  const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] ?? 'th'
+  return `${n}${suffix}`
 }
 
 function Threshold({ rule, onSave }: { rule: AlertRule; onSave: (v: number) => void }) {

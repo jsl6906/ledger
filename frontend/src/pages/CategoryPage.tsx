@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { get, put, type CategoryDetail } from '../api'
-import { MonthlyBars } from '../components/Charts'
-import { Breakdown, BudgetCard, Findings, Kpis, RangeSeg, RenameCard, TxnList, YearTable } from '../components/Detail'
+import { MonthlyBars, YtdBlock } from '../components/Charts'
+import { Breakdown, BudgetCard, Findings, Kpis, RangeSeg, RenameCard, StackCard, TxnList, YearTable } from '../components/Detail'
 import { Button, Card, ErrorNote } from '../components/ui'
-import { breakdownPath, measure, rangeLabel, summarize, useDetailRange } from '../detail'
+import { breakdownPath, measure, OTHER_SUB, rangeLabel, subKey, summarize, useDetailRange } from '../detail'
 import { fullDate, money, monthEnd, monthLabel, parseIso } from '../format'
 import { groupPath, merchantPath } from '../links'
 
@@ -41,6 +41,9 @@ function CategoryView({ id }: { id: number }) {
   const value = measure(c.type)
   const sum = summarize(d.monthly, value)
   const verb = c.type === 'income' ? 'received' : 'spent'
+  const shown = d.stack.series.filter((s) => s.id !== null).map((s) => String(s.id))
+  const subParams = r.sub === OTHER_SUB ? { exclude_merchant: shown } : r.sub ? { merchant: r.sub } : {}
+  const subName = r.sub === OTHER_SUB ? 'Other merchants' : d.stack.series.find((s) => subKey(s) === r.sub)?.name ?? r.sub
 
   return (
     <section className="page">
@@ -87,6 +90,11 @@ function CategoryView({ id }: { id: number }) {
         <div className="card-meta">Net of refunds. Hover a month for its top merchants; click to filter the transactions below.</div>
       </Card>
 
+      <StackCard kicker="Merchants over time" stack={d.stack} r={r} show="transactions"
+        contrib={(m, s) => s.id === null ? undefined
+          : { start: m, end: monthEnd(m), basis: 'all', level: 'category', ids: [id], merchant: String(s.id) }} />
+      <Card><YtdBlock kicker="Year to date" data={d.ytd} verb={verb} /></Card>
+
       <div className="grid-2" style={{ alignItems: 'start' }}>
         <Breakdown kicker="Top merchants" rows={d.merchants} to={(x) => merchantPath(String(x.id))} value={value} />
         <Breakdown kicker="Accounts" rows={d.accounts} to={breakdownPath.account} value={value} />
@@ -95,7 +103,8 @@ function CategoryView({ id }: { id: number }) {
       <RelatedSetup d={d} categoryId={id} />
       <YearTable rows={d.yearly} show={c.type === 'income' ? ['received', 'spent', 'net'] : ['spent', 'received', 'net']} />
       <Findings params={{ category_id: id }} />
-      <TxnList params={{ category_id: id, start: r.start }} month={r.month} onClearMonth={r.clearMonth} hide={['category']} />
+      <TxnList params={{ category_id: id, start: r.start, ...subParams }} month={r.month} onClearMonth={r.clearMonth} hide={['category']}
+        sub={r.sub ? { label: subName ?? '', onClear: r.clearSub } : null} />
     </section>
   )
 }

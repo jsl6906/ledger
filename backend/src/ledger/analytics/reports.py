@@ -136,6 +136,44 @@ async def category_trend(
     return {"months": months, "series": series}
 
 
+def _day_slot(d: date) -> int:
+    """Day index on a leap-year calendar, so Mar 1 lines up across years."""
+    return (date(2000, d.month, d.day) - date(2000, 1, 1)).days
+
+
+def ytd_lines(daily: dict[date, float], first_year: int, today: date) -> dict:
+    """Running total from Jan 1 per calendar year, newest first: 366 points (this year's stop at today). Years before
+    the first with data are left out."""
+    days: dict[int, list[float]] = {}
+    for d, v in daily.items():
+        days.setdefault(d.year, [0.0] * 366)[_day_slot(d)] += v
+    years = []
+    for y in range(today.year, max(first_year, min(days, default=today.year)) - 1, -1):
+        run, values = 0.0, []
+        for v in days.get(y, [0.0] * 366)[: _day_slot(today) + 1 if y == today.year else 366]:
+            run += v
+            values.append(round(run, 2))
+        years.append({"year": y, "values": values, "total": values[-1]})
+    return {"today": today, "years": years}
+
+
+async def ytd(session: AsyncSession, years: int = 5, today: date | None = None) -> dict:
+    """Year-to-date income and expense lines for this year and the `years - 1` before it."""
+    today = today or date.today()
+    first = today.year - years + 1
+    sql = f"""--sql
+        SELECT t.txn_date AS d, sum({INCOME}) AS income, sum({EXPENSE}) AS expenses
+        {FROM}
+        WHERE {REPORTABLE} AND t.txn_date BETWEEN :start AND :end
+        GROUP BY 1
+    """
+    rows = (await session.execute(text(sql), {"start": date(first, 1, 1), "end": today})).all()
+    return {
+        "expense": ytd_lines({r.d: _f(r.expenses) for r in rows}, first, today),
+        "income": ytd_lines({r.d: _f(r.income) for r in rows}, first, today),
+    }
+
+
 async def top_merchants(session: AsyncSession, start: date, end: date, limit: int = 15) -> list[dict]:
     sql = f"""--sql
         SELECT coalesce(t.merchant, lower(t.description)) AS merchant,

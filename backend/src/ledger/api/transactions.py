@@ -10,6 +10,7 @@ from sqlalchemy import String as SAString
 from sqlalchemy.dialects.postgresql import aggregate_order_by, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger.analytics.entity import DESC_CODE, DESC_SEP
 from ledger.analytics.transfers import hidden_account, internal_transfer
 from ledger.db.engine import get_session
 from ledger.db.filters import id_in
@@ -56,6 +57,19 @@ SORT_KEYS = {
     "account": func.lower(Account.name),
 }
 SORT_PATTERN = rf"^({'|'.join(SORT_KEYS)})_(asc|desc)$"
+MERCHANT_KEY = func.coalesce(Transaction.merchant, func.lower(Transaction.description))
+# Same as entity.DESC_KEY: the description with reference-code tokens dropped, lowercased.
+DESC_KEY = func.lower(
+    func.coalesce(
+        func.nullif(
+            func.btrim(
+                func.regexp_replace(func.regexp_replace(Transaction.description, DESC_CODE, "", "g"), DESC_SEP, " ", "g")
+            ),
+            "",
+        ),
+        Transaction.description,
+    )
+)
 
 
 def _sorted(stmt: Select, sort: str) -> Select:
@@ -151,6 +165,9 @@ def _filtered(
     import_batch_id: int | None = None,
     merchant: str | None = None,
     rule_id: int | None = None,
+    desc_key: str | None = None,
+    exclude_merchant: list[str] | None = None,
+    exclude_desc_key: list[str] | None = None,
 ) -> list:
     conds = [Transaction.deleted_at.is_(None)]
     if rule_id:
@@ -166,7 +183,13 @@ def _filtered(
             )
         )
     if merchant:
-        conds.append(func.coalesce(Transaction.merchant, func.lower(Transaction.description)) == merchant)
+        conds.append(MERCHANT_KEY == merchant)
+    if exclude_merchant:
+        conds.append(MERCHANT_KEY.not_in(exclude_merchant))
+    if desc_key:
+        conds.append(DESC_KEY == desc_key)
+    if exclude_desc_key:
+        conds.append(DESC_KEY.not_in(exclude_desc_key))
     if start:
         conds.append(Transaction.txn_date >= start)
     if end:
@@ -228,6 +251,9 @@ async def list_transactions(
     import_batch_id: int | None = None,
     merchant: str | None = None,
     rule_id: int | None = None,
+    desc_key: str | None = None,
+    exclude_merchant: list[str] | None = Query(None),
+    exclude_desc_key: list[str] | None = Query(None),
     include_hidden: bool = False,
     sort: str = Query("date_desc", pattern=SORT_PATTERN),
     limit: int = Query(100, ge=1, le=1000),
@@ -236,7 +262,7 @@ async def list_transactions(
 ):
     conds = _filtered(
         q, start, end, account_id, category_id, group_id, member_id, tag_id, status, min_amount, max_amount, import_batch_id,
-        merchant, rule_id,
+        merchant, rule_id, desc_key, exclude_merchant, exclude_desc_key,
     )
     if not include_hidden:
         conds += _visible(account_id)

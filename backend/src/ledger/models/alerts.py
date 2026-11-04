@@ -6,7 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ledger.db.base import Base
 
-ALERT_KINDS = ("budget_overspend", "out_of_norm", "large_transaction", "weekly_digest")
+ALERT_KINDS = ("budget_overspend", "out_of_norm", "large_transaction", "weekly_digest", "monthly_digest")
 
 
 class AlertRule(Base):

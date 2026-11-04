@@ -86,6 +86,18 @@ def build_scheduler() -> AsyncIOScheduler:
         coalesce=True,
         misfire_grace_time=6 * 3600,
     )
+    # Daily: the job sends last month's report once its accounts have loaded (or on the cap day) and is a no-op
+    # otherwise, so a missed day just catches up on the next.
+    scheduler.add_job(
+        _enqueue,
+        "cron",
+        hour=7,
+        minute=5,
+        args=["monthly_digest"],
+        id="monthly-digest",
+        coalesce=True,
+        misfire_grace_time=6 * 3600,
+    )
     scheduler.add_job(
         _enqueue,
         "cron",
