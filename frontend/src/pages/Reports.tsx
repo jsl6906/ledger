@@ -128,9 +128,12 @@ export function Reports() {
   const byPeak = [...cashAccts].sort((a, b) => peak(b) - peak(a))
   const shownCash = byPeak.length > CASH_BANDS ? byPeak.slice(0, CASH_BANDS - 1) : byPeak
   const otherCash = byPeak.slice(shownCash.length)
-  const cash = balanceView(balMonths, cashAccts, [
+  const cardAccts = allAccts.filter((a) => a.account_type === 'credit_card')
+  // Liquid assets: checking and savings above zero, credit card balances (already negative) below.
+  const cash = balanceView(balMonths, [...cashAccts, ...cardAccts], [
     ...shownCash.map((a, i) => ({ name: a.name, color: stackColor(a.name, i), accts: [a] })),
     ...(otherCash.length ? [{ name: 'Other', color: stackColor('Other', 0), accts: otherCash }] : []),
+    ...(cardAccts.length ? [{ name: 'Credit cards', color: NET_DOWN, accts: cardAccts }] : []),
   ])
   const change = (v: ReturnType<typeof balanceView>) => (v.first >= 0 ? (v.total[v.last] ?? 0) - (v.total[v.first] ?? 0) : 0)
   const lateJoiners = nw.accts
@@ -307,7 +310,7 @@ export function Reports() {
 
       {([
         { key: 'nw', kicker: 'Net worth', label: 'net worth', v: nw, perAccount: false, total: 'Net worth' },
-        { key: 'cash', kicker: 'Checking + savings', label: 'checking + savings', v: cash, perAccount: true, total: 'Total' },
+        { key: 'cash', kicker: 'Liquid assets', label: 'liquid assets', v: cash, perAccount: true, total: 'Liquid assets' },
       ] as const).map((c) => (
         <Card key={c.key}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -328,7 +331,8 @@ export function Reports() {
           <BalanceChart months={c.v.months} bands={c.v.bands} total={c.v.total} estimated={c.v.estimated}
             tip={balTip(c.v, c.label, c.perAccount)} />
           <div className="card-meta">
-            Month-end balances{c.key === 'nw' ? '; debts shown below zero. Homes, vehicles and loans follow a straight line between known values, including purchase prices' : ''}.
+            Month-end balances{c.key === 'nw' ? '; debts shown below zero. Homes, vehicles and loans follow a straight line between known values, including purchase prices'
+              : '; checking and savings less credit card balances, which are shown below zero'}.
             {c.v.estimated.some(Boolean) && ' Shaded months lean on balances rebuilt from transactions, working back from the first known balance.'}
             {c.key === 'nw' && lateJoiners.length > 0 && ` Balance history starts later for ${lateJoiners.slice(0, 4)
               .map(({ a, at }) => `${a.name} (${monthName(c.v.months[at])})`).join(', ')}${lateJoiners.length > 4 ? ` and ${lateJoiners.length - 4} more` : ''}.`}

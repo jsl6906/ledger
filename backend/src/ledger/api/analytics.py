@@ -47,7 +47,7 @@ async def balances(
     months: int = Query(12, ge=1, le=240),
     session: AsyncSession = Depends(get_session),
 ):
-    """Month-end balance per account, with net worth and checking + savings totals."""
+    """Month-end balance per account, with net worth and liquid assets totals."""
     return await monthly_balances(session, *_range(start, end, months))
 
 

@@ -215,4 +215,4 @@ async def test_monthly_balances_endpoint(client):
 
     assert out["net_worth"] == total(lambda a: True)
     assert out["liabilities"] == [-v for v in total(lambda a: a["liability"])]
-    assert out["cash"] == total(lambda a: a["account_type"] in ("checking", "savings"))
+    assert out["liquid"] == total(lambda a: a["account_type"] in ("checking", "savings", "credit_card"))

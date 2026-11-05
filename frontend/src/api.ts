@@ -371,7 +371,7 @@ export interface BalanceSeries {
     /** Rebuilt from transactions before the account's first known balance. */
     estimated: boolean[]
   }[]
-  assets: number[]; liabilities: number[]; net_worth: number[]; cash: number[]
+  assets: number[]; liabilities: number[]; net_worth: number[]; liquid: number[]
 }
 /** Filter for /analytics/contributors; in ids/exclude, 0 means Uncategorized. */
 export type ContribParams = {

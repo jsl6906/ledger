@@ -1,4 +1,4 @@
-"""Month-end balances per account, for the net worth and checking + savings charts.
+"""Month-end balances per account, for the net worth and liquid assets charts.
 
 Each account's balance at a month end comes from its latest snapshot on or before that day: account_balance rows, and
 the closing balances of statements for checking, savings, loan, mortgage and investment accounts. Statement balances
@@ -21,6 +21,7 @@ from ledger.models.sources import SOURCE_KINDS
 
 LIABILITIES = ("credit_card", "loan", "mortgage")
 CASH = ("checking", "savings")
+LIQUID = (*CASH, "credit_card")
 # Values that drift steadily between valuations or statements rather than jumping with each transaction.
 INTERPOLATED = ("property", "vehicle", "loan", "mortgage")
 
@@ -279,7 +280,8 @@ async def account_history(
 
 
 async def monthly_balances(session: AsyncSession, start: date, end: date, today: date | None = None) -> dict:
-    """Per-account month-end balances with monthly totals for net worth and checking + savings."""
+    """Per-account month-end balances with monthly totals for net worth and liquid assets (checking + savings less
+    credit card balances)."""
     points = month_points(start, end, today or date.today())
     rows = await account_balances(session, points)
 
@@ -295,5 +297,5 @@ async def monthly_balances(session: AsyncSession, start: date, end: date, today:
         "assets": assets,
         "liabilities": debts,
         "net_worth": [round(a - d, 2) for a, d in zip(assets, debts, strict=True)],
-        "cash": total(lambda r: r["account_type"] in CASH),
+        "liquid": total(lambda r: r["account_type"] in LIQUID),
     }

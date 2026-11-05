@@ -215,8 +215,8 @@ async def _net_worth(session: AsyncSession, start: date, end: date) -> dict | No
         "end": nw["net_worth"][1],
         "assets": nw["assets"][1],
         "liabilities": nw["liabilities"][1],
-        "cash_start": nw["cash"][0],
-        "cash": nw["cash"][1],
+        "liquid_start": nw["liquid"][0],
+        "liquid": nw["liquid"][1],
     }
 
 
@@ -272,8 +272,9 @@ NARRATIVE_SYSTEM = (
     "You write the narrative part of a household's monthly finance review email. The JSON facts cover the month's "
     "income, spending and net (income minus spending), the previous month, a typical month (average of up to 12 "
     "before), spending by category next to its typical month, the month's final budget results, unbudgeted "
-    "spending, top merchants, largest charges, merchants used for the first time, net worth and checking + savings "
-    "at the start and end of the month, out-of-norm findings and items waiting for review.\n"
+    "spending, top merchants, largest charges, merchants used for the first time, net worth and liquid assets "
+    "(checking + savings less credit card balances) at the start and end of the month, out-of-norm findings and "
+    "items waiting for review.\n"
     "Use only these facts: never invent amounts, merchants, dates or causes. Be plain and specific, use $ amounts, "
     "no greetings, filler or moralizing. A month can catch two payments of a monthly bill or none, so treat rent, "
     "mortgage, loan, insurance or utility swings as timing unless the facts say otherwise. If some accounts hadn't "
@@ -371,7 +372,7 @@ def _sections(d: dict) -> list[Section]:
     nw = d["net_worth"]
     if nw:
         change = nw["end"] - nw["start"]
-        cash_change = nw["cash"] - nw["cash_start"]
+        liquid_change = nw["liquid"] - nw["liquid_start"]
         sections.append(
             (
                 "Net worth",
@@ -383,8 +384,8 @@ def _sections(d: dict) -> list[Section]:
                     ),
                     (f"Assets {money(nw['assets'])}; liabilities {money(nw['liabilities'])}.", None),
                     (
-                        f"Checking + savings {money(nw['cash'])}, {'up' if cash_change >= 0 else 'down'} "
-                        f"{money(abs(cash_change))}.",
+                        f"Liquid assets (checking + savings less credit cards) {signed(nw['liquid'])}, "
+                        f"{'up' if liquid_change >= 0 else 'down'} {money(abs(liquid_change))}.",
                         None,
                     ),
                 ],
